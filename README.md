@@ -34,8 +34,8 @@ Before you begin, make sure you have:
 ### Step 1 — Clone and install dependencies
 
 ```bash
-git clone <repo-url>
-cd google-docs-mcp
+git clone https://github.com/shadowandy/Google-Docs-MCP.git
+cd Google-Docs-MCP
 npm install
 cp wrangler.toml.example wrangler.toml
 ```

@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Wrangler local state and build artifacts
+.wrangler/
+dist/
+worker-configuration.d.ts
+
+# Wrangler config with real IDs and secrets
+wrangler.toml
+
+# Local secrets (wrangler dev variables)
+.dev.vars
+.dev.vars.*
+
+# AI assistant context files
+.claude/
+.gemini/
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+
+# macOS
+.DS_Store
+
+# Environment files
+.env
+.env.*
