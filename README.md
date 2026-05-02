@@ -182,17 +182,31 @@ Claude will now have access to your Google Documents.
 
 ## Available Tools
 
-Once connected, Claude has access to five tools:
+Once connected, Claude has access to ten tools:
+
+### Reading & Discovery
 
 | Tool | Description |
 |------|-------------|
+| `list_documents()` | List the 20 most recently modified Docs from Drive |
 | `search_documents(query)` | Search Drive for documents by title or body content |
 | `read_document(documentId)` | Read a document and return it as Markdown |
+| `get_document_info(documentId)` | Return title, revision ID, last modified time, and file size without fetching the body |
+| `list_sections(documentId)` | List all headings in a document with their level — use this before editing to confirm exact header text |
+
+### Writing & Editing
+
+| Tool | Description |
+|------|-------------|
 | `create_document(title)` | Create a new empty document |
-| `edit_section(documentId, headerText, newContent)` | Replace content under a named section header |
 | `append_text(documentId, newContent)` | Append Markdown to the end of a document |
+| `edit_section(documentId, headerText, newContent)` | Replace all content beneath a named section header (header line is preserved) |
+| `find_and_replace(documentId, findText, replaceText, matchCase?)` | Replace all occurrences of a string; returns the number of replacements made |
+| `delete_section(documentId, headerText)` | Permanently remove a section — the header and all content beneath it up to the next same-or-higher-level heading |
 
 The `documentId` parameter accepts either a bare Google Docs ID or a full `https://docs.google.com/...` URL.
+
+> **Tip**: Run `list_sections` before `edit_section` or `delete_section` to confirm the exact heading text as it appears in the document.
 
 ---
 
@@ -200,10 +214,14 @@ The `documentId` parameter accepts either a bare Google Docs ID or a full `https
 
 Once connected, you can ask Claude things like:
 
+- *"Show me my most recently modified documents."*
 - *"Find my document about Project Phoenix and summarize it."*
+- *"What sections are in my Project Roadmap doc?"*
 - *"Create a new document titled 'Meeting Notes' and add a summary section."*
 - *"In my Project Roadmap doc, replace the 'Q3 Goals' section with this updated content: ..."*
+- *"Rename every occurrence of 'FY2024' to 'FY2025' in my Budget doc."*
 - *"Append a conclusion paragraph to my design document."*
+- *"Delete the 'Draft Notes' section from my proposal."*
 
 ---
 
