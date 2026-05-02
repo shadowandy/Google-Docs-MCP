@@ -9,7 +9,7 @@ import {
 import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { getAccessToken } from "./auth";
 import { Env } from "./types";
-import { getDocument, createDocument, searchDocuments, replaceSection, appendText } from "./google-api";
+import { getDocument, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection } from "./google-api";
 import { docToMarkdown } from "./markdown-utils";
 import { checkRateLimit } from "./utils";
 
@@ -230,6 +230,68 @@ export class MCPSession {
           },
           required: ["documentId", "newContent"]
         }
+      },
+      {
+        name: "list_sections",
+        description: "List all section headers in a Google Document with their heading level and position. Use this before edit_section or delete_section to confirm exact header text.",
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            documentId: { type: "string", description: "The ID or full URL of the Google Document" }
+          },
+          required: ["documentId"]
+        }
+      },
+      {
+        name: "get_document_info",
+        description: "Return metadata for a Google Document: title, document ID, revision ID, last modified time, and file size. Does not return document body content.",
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            documentId: { type: "string", description: "The ID or full URL of the Google Document" }
+          },
+          required: ["documentId"]
+        }
+      },
+      {
+        name: "find_and_replace",
+        description: "Find all occurrences of a text string in a Google Document and replace them. Returns the number of replacements made.",
+        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+            findText: { type: "string", description: "The text to search for" },
+            replaceText: { type: "string", description: "The text to replace each match with" },
+            matchCase: { type: "boolean", description: "Whether the search is case-sensitive (default: false)" }
+          },
+          required: ["documentId", "findText", "replaceText"]
+        }
+      },
+      {
+        name: "list_documents",
+        description: "List the user's most recently modified Google Documents from Drive. Returns up to 20 documents with their IDs, names, and last modified times.",
+        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+        inputSchema: {
+          type: "object" as const,
+          properties: {},
+          required: []
+        }
+      },
+      {
+        name: "delete_section",
+        description: "Permanently delete a section from a Google Document — the header and all content beneath it up to the next same-or-higher-level heading. This action cannot be undone.",
+        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+        inputSchema: {
+          type: "object" as const,
+          properties: {
+            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+            headerText: { type: "string", description: "The exact header text of the section to delete" }
+          },
+          required: ["documentId", "headerText"]
+        }
       }
     ];
   }
@@ -268,6 +330,43 @@ export class MCPSession {
       case "append_text": {
         await appendText(args.documentId, args.newContent, accessToken);
         return { content: [{ type: "text", text: "Text successfully appended to the document." }] };
+      }
+      case "list_sections": {
+        const doc = await getDocument(args.documentId, accessToken);
+        const sections = listSections(doc);
+        if (sections.length === 0) {
+          return { content: [{ type: "text", text: "No sections (headings) found in this document." }] };
+        }
+        const formatted = sections
+          .map(s => `${"  ".repeat(s.level - 1)}${"#".repeat(s.level)} ${s.text}`)
+          .join("\n");
+        return { content: [{ type: "text", text: formatted }] };
+      }
+      case "get_document_info": {
+        const info = await getDocumentInfo(args.documentId, accessToken);
+        return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
+      }
+      case "find_and_replace": {
+        const count = await findAndReplace(
+          args.documentId,
+          args.findText,
+          args.replaceText,
+          args.matchCase ?? false,
+          accessToken
+        );
+        return { content: [{ type: "text", text: `Replaced ${count} occurrence${count !== 1 ? "s" : ""}.` }] };
+      }
+      case "list_documents": {
+        const result = await listDocuments(accessToken) as any;
+        const files = result.files ?? [];
+        if (files.length === 0) {
+          return { content: [{ type: "text", text: "No documents found." }] };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(files, null, 2) }] };
+      }
+      case "delete_section": {
+        await deleteSection(args.documentId, args.headerText, accessToken);
+        return { content: [{ type: "text", text: `Section "${args.headerText}" deleted successfully.` }] };
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${name}`);
