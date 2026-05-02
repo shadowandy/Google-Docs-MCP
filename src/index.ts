@@ -21,6 +21,7 @@ function buildCorsHeaders(requestOrigin: string | null, extra: Record<string, st
   const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-mcp-protocol-version",
+    "Access-Control-Max-Age": "86400",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -228,6 +229,7 @@ export default {
 </html>`, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
             "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
             "Permissions-Policy": "geolocation=(), microphone=(), camera=()",

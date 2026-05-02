@@ -378,6 +378,14 @@ export class MCPSession {
   private registerHandlers(server: Server) {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       this.log("info", "tools/list request received");
+      
+      // Defense-in-depth: verify session token still exists in KV
+      const userToken = await this.state.storage.get<string>("userToken");
+      if (userToken) {
+        const valid = await this.env.TOKENS.get(userToken);
+        if (!valid) throw new McpError(ErrorCode.InvalidRequest, "Session revoked or expired");
+      }
+
       return { tools: this.toolDefinitions };
     });
 
