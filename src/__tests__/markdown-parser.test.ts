@@ -48,9 +48,10 @@ describe("markdownToBatchUpdates", () => {
     expect(insert!.insertText!.text).toBe("Section\n");
   });
 
-  it("does not produce a heading request for plain text", () => {
+  it("produces NORMAL_TEXT paragraph style for plain text to prevent heading inheritance", () => {
     const reqs = markdownToBatchUpdates("plain", 0);
-    expect(reqs.every(r => !r.updateParagraphStyle)).toBe(true);
+    const para = reqs.find(r => r.updateParagraphStyle);
+    expect(para!.updateParagraphStyle!.paragraphStyle.namedStyleType).toBe("NORMAL_TEXT");
   });
 
   // ── Inline formatting ──────────────────────────────────────────────────────
