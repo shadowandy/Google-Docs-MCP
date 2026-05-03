@@ -381,10 +381,9 @@ export class MCPSession {
       
       // Defense-in-depth: verify session token still exists in KV
       const userToken = await this.state.storage.get<string>("userToken");
-      if (userToken) {
-        const valid = await this.env.TOKENS.get(userToken);
-        if (!valid) throw new McpError(ErrorCode.InvalidRequest, "Session revoked or expired");
-      }
+      if (!userToken) throw new McpError(ErrorCode.InvalidRequest, "Session not initialised");
+      const valid = await this.env.TOKENS.get(userToken);
+      if (!valid) throw new McpError(ErrorCode.InvalidRequest, "Session revoked or expired");
 
       return { tools: this.toolDefinitions };
     });
@@ -397,8 +396,8 @@ export class MCPSession {
         );
       } catch (error: any) {
         if (error instanceof McpError) throw error;
-        console.error(`MCP Tool Error [${request.params.name}]:`, error);
-        throw new McpError(ErrorCode.InternalError, `Google API Error: ${error.message || "Unknown error"}`);
+        console.error(`MCP Tool Error [${request.params.name}]:`, error.message, error.stack);
+        throw new McpError(ErrorCode.InternalError, "An internal error occurred. Please try again.");
       }
     });
   }
@@ -434,8 +433,18 @@ export class MCPSession {
     await this.ensureStreamableServer();
 
     const MAX_BODY = 512 * 1024;
-    const contentLength = parseInt(request.headers.get("content-length") ?? "0");
-    if (contentLength > MAX_BODY) {
+
+    let rawBody: string;
+    try {
+      rawBody = await request.text();
+    } catch {
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }),
+        { status: 400, headers: { "Content-Type": "application/json" } }
+      );
+    }
+
+    if (new TextEncoder().encode(rawBody).length > MAX_BODY) {
       return new Response(
         JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Payload too large" } }),
         { status: 413, headers: { "Content-Type": "application/json" } }
@@ -444,7 +453,7 @@ export class MCPSession {
 
     let body: JSONRPCMessage;
     try {
-      body = await request.json() as JSONRPCMessage;
+      body = JSON.parse(rawBody) as JSONRPCMessage;
     } catch {
       return new Response(
         JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }),
@@ -459,12 +468,14 @@ export class MCPSession {
       return new Response(null, { status: 202 });
     }
 
+    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(userToken));
+    const sessionTag = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+
     return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        // Echo the token as session ID so the client can include it in subsequent requests
-        "Mcp-Session-Id": userToken,
+        "Mcp-Session-Id": sessionTag,
       }
     });
   }

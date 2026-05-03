@@ -33,14 +33,13 @@ export async function getDocument(documentIdOrUrl: string, accessToken: string):
   if (!response.ok) {
     throw new Error(`Google Docs API error (${response.status}): ${await extractApiError(response)}`);
   }
-  
-  // F20/D: Guard against memory exhaustion from extremely large documents
-  const contentLength = parseInt(response.headers.get("Content-Length") ?? "0");
-  if (contentLength > 10 * 1024 * 1024) { // 10MB limit for the raw JSON
+
+  const text = await response.text();
+  if (new TextEncoder().encode(text).length > 10 * 1024 * 1024) {
     throw new Error("Document is too large to process (exceeds 10MB memory safety limit)");
   }
 
-  return response.json() as Promise<GoogleDoc>;
+  return JSON.parse(text) as GoogleDoc;
 }
 
 export async function createDocument(title: string, accessToken: string): Promise<string> {

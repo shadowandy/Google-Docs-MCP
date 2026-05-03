@@ -151,9 +151,15 @@ export default {
           const userToken = url.searchParams.get("token");
           if (!userToken) return new Response("Missing Token", { status: 401 });
 
-          // Validate userToken exists
           const exists = await env.TOKENS.get(userToken);
           if (!exists) return new Response("Invalid Token", { status: 401 });
+
+          // Rate limit: 120 tool calls / token / minute (same as Streamable HTTP)
+          if (!await checkRateLimit(env.TOKENS, `mcp:${userToken}`, 120, 60)) {
+            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
+              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
+            });
+          }
 
           const id = env.MCP_SESSION.idFromName(userToken);
           const obj = env.MCP_SESSION.get(id);
@@ -176,7 +182,7 @@ export default {
         // Pattern: /mcp/messages?token=<userToken>
         if (url.pathname === "/mcp/messages") {
           let userToken = url.searchParams.get("token");
-          
+
           // Fallback: check Authorization header
           const auth = request.headers.get("Authorization");
           if (!userToken && auth?.startsWith("Bearer ")) {
@@ -184,6 +190,9 @@ export default {
           }
 
           if (!userToken) return new Response("Missing Token", { status: 401 });
+
+          const exists = await env.TOKENS.get(userToken);
+          if (!exists) return new Response("Invalid Token", { status: 401 });
 
           const id = env.MCP_SESSION.idFromName(userToken);
           const obj = env.MCP_SESSION.get(id);
