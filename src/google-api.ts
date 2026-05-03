@@ -1,5 +1,5 @@
 import { markdownToBatchUpdates } from "./markdown-parser";
-import { GoogleDoc, BatchUpdateRequest } from "./types";
+import { GoogleDoc, BatchUpdateRequest, SectionInfo } from "./types";
 
 const DOC_ID_RE = /^[a-zA-Z0-9_-]{25,55}$/;
 
@@ -25,6 +25,52 @@ export function extractDocumentId(input: string): string {
   return id;
 }
 
+// ── Document navigation helpers ─────────────────────────────────────────────
+
+function headingLevel(namedStyleType: string): number {
+  return parseInt(namedStyleType.split("_")[1]);
+}
+
+interface SectionRange {
+  /** startIndex of the heading paragraph itself */
+  headerStart: number;
+  /** endIndex of the heading paragraph (first index of body content) */
+  contentStart: number;
+  /** startIndex of the next same-or-higher heading, or doc endIndex − 1 */
+  contentEnd: number;
+}
+
+function findSectionRange(doc: GoogleDoc, headerText: string): SectionRange | null {
+  const target = headerText.toLowerCase().trim();
+  let found: { level: number; headerStart: number; contentStart: number } | null = null;
+
+  for (const element of doc.body.content) {
+    const style = element.paragraph?.paragraphStyle?.namedStyleType ?? "";
+    if (!style.startsWith("HEADING_")) continue;
+
+    const level = headingLevel(style);
+    const text = element.paragraph!.elements
+      .map((e: any) => e.textRun?.content ?? "")
+      .join("")
+      .trim();
+
+    if (!found) {
+      if (text.toLowerCase() === target) {
+        found = { level, headerStart: element.startIndex, contentStart: element.endIndex };
+      }
+    } else if (level <= found.level) {
+      return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: element.startIndex };
+    }
+  }
+
+  if (!found) return null;
+
+  const last = doc.body.content[doc.body.content.length - 1];
+  return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: last.endIndex - 1 };
+}
+
+// ── Google Docs API calls ────────────────────────────────────────────────────
+
 export async function getDocument(documentIdOrUrl: string, accessToken: string): Promise<GoogleDoc> {
   const documentId = extractDocumentId(documentIdOrUrl);
   const response = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
@@ -45,7 +91,7 @@ export async function getDocument(documentIdOrUrl: string, accessToken: string):
 export async function createDocument(title: string, accessToken: string): Promise<string> {
   const response = await fetch(`https://docs.googleapis.com/v1/documents`, {
     method: "POST",
-    headers: { 
+    headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json"
     },
@@ -62,7 +108,7 @@ export async function batchUpdate(documentIdOrUrl: string, requests: BatchUpdate
   const documentId = extractDocumentId(documentIdOrUrl);
   const response = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}:batchUpdate`, {
     method: "POST",
-    headers: { 
+    headers: {
       Authorization: `Bearer ${accessToken}`,
       "Content-Type": "application/json"
     },
@@ -87,31 +133,21 @@ export async function searchDocuments(query: string, accessToken: string) {
   return response.json();
 }
 
-export interface SectionInfo {
-  level: number;
-  text: string;
-  startIndex: number;
-}
-
 export function listSections(doc: GoogleDoc): SectionInfo[] {
-  const sections: SectionInfo[] = [];
-  for (const element of doc.body.content) {
-    const style = element.paragraph?.paragraphStyle?.namedStyleType ?? "";
-    if (style.startsWith("HEADING_")) {
-      const level = parseInt(style.split("_")[1]);
-      const text = element.paragraph!.elements
+  return doc.body.content
+    .filter(el => el.paragraph?.paragraphStyle?.namedStyleType.startsWith("HEADING_") ?? false)
+    .map(el => ({
+      level: headingLevel(el.paragraph!.paragraphStyle!.namedStyleType),
+      text: el.paragraph!.elements
         .map((e: any) => e.textRun?.content ?? "")
         .join("")
-        .replace(/\n$/, "");
-      sections.push({ level, text, startIndex: element.startIndex });
-    }
-  }
-  return sections;
+        .replace(/\n$/, ""),
+      startIndex: el.startIndex,
+    }));
 }
 
 export async function getDocumentInfo(documentIdOrUrl: string, accessToken: string) {
   const documentId = extractDocumentId(documentIdOrUrl);
-  // Request only the fields we need — avoids fetching the full body
   const fields = "documentId,title,revisionId,documentStyle";
   const response = await fetch(
     `https://docs.googleapis.com/v1/documents/${documentId}?fields=${encodeURIComponent(fields)}`,
@@ -122,13 +158,14 @@ export async function getDocumentInfo(documentIdOrUrl: string, accessToken: stri
   }
   const data = await response.json() as any;
 
-  // Fetch file metadata (size, modifiedTime) from Drive
   const driveFields = "id,name,modifiedTime,size";
   const driveResponse = await fetch(
     `https://www.googleapis.com/drive/v3/files/${documentId}?fields=${encodeURIComponent(driveFields)}`,
     { headers: { Authorization: `Bearer ${accessToken}` } }
   );
-  if (driveResponse.ok) {
+  if (!driveResponse.ok) {
+    console.warn(`Drive metadata fetch failed for ${documentId} (${driveResponse.status}) — modifiedTime and size unavailable`);
+  } else {
     const drive = await driveResponse.json() as any;
     data.modifiedTime = drive.modifiedTime;
     data.size = drive.size;
@@ -145,13 +182,13 @@ export async function findAndReplace(
   accessToken: string
 ): Promise<number> {
   const documentId = extractDocumentId(documentIdOrUrl);
-  const requests = [{
+  const requests: BatchUpdateRequest[] = [{
     replaceAllText: {
       containsText: { text: findText, matchCase },
       replaceText,
     },
   }];
-  const result = await batchUpdate(documentId, requests as any, accessToken) as any;
+  const result = await batchUpdate(documentId, requests, accessToken) as any;
   return result.replies?.[0]?.replaceAllText?.occurrencesChanged ?? 0;
 }
 
@@ -172,108 +209,43 @@ export async function deleteSection(documentIdOrUrl: string, headerText: string,
   const documentId = extractDocumentId(documentIdOrUrl);
   const doc = await getDocument(documentId, accessToken);
 
-  let sectionStart = -1; // index of the header paragraph itself
-  let sectionEnd = -1;
-  let headerLevel = -1;
+  const range = findSectionRange(doc, headerText);
+  if (!range) throw new Error(`Section with header "${headerText}" not found.`);
 
-  for (let i = 0; i < doc.body.content.length; i++) {
-    const element = doc.body.content[i];
-    const style = element.paragraph?.paragraphStyle?.namedStyleType ?? "";
-    if (style.startsWith("HEADING_")) {
-      const text = element.paragraph!.elements
-        .map((e: any) => e.textRun?.content ?? "")
-        .join("")
-        .trim();
-
-      if (sectionStart === -1) {
-        if (text.toLowerCase() === headerText.toLowerCase().trim()) {
-          sectionStart = element.startIndex;
-          headerLevel = parseInt(style.split("_")[1]);
-        }
-      } else {
-        const currentLevel = parseInt(style.split("_")[1]);
-        if (currentLevel <= headerLevel) {
-          sectionEnd = element.startIndex;
-          break;
-        }
-      }
-    }
-  }
-
-  if (sectionStart === -1) {
-    throw new Error(`Section with header "${headerText}" not found.`);
-  }
-
-  if (sectionEnd === -1) {
-    const last = doc.body.content[doc.body.content.length - 1];
-    sectionEnd = last.endIndex - 1;
-  }
-
-  const requests = [{
-    deleteContentRange: { range: { startIndex: sectionStart, endIndex: sectionEnd } },
+  const requests: BatchUpdateRequest[] = [{
+    deleteContentRange: { range: { startIndex: range.headerStart, endIndex: range.contentEnd } },
   }];
-  return batchUpdate(documentId, requests as any, accessToken);
-}
-
-// Context-based editing logic
-export async function replaceSection(documentIdOrUrl: string, headerText: string, newContentMarkdown: string, accessToken: string) {
-  const documentId = extractDocumentId(documentIdOrUrl);
-  const doc = await getDocument(documentId, accessToken);
-
-  // 1. Find the content range beneath the header (header itself is preserved)
-  let contentStart = -1; // first index after the header paragraph
-  let contentEnd = -1;
-  let headerLevel = -1;
-
-  for (let i = 0; i < doc.body.content.length; i++) {
-    const element = doc.body.content[i];
-    if (element.paragraph?.paragraphStyle?.namedStyleType.startsWith("HEADING_")) {
-      const text = element.paragraph.elements.map((e: any) => e.textRun?.content || "").join("").trim();
-
-      if (contentStart === -1) {
-        if (text.toLowerCase() === headerText.toLowerCase().trim()) {
-          contentStart = element.endIndex; // start after the header line
-          headerLevel = parseInt(element.paragraph.paragraphStyle.namedStyleType.split("_")[1]);
-        }
-      } else {
-        const currentLevel = parseInt(element.paragraph.paragraphStyle.namedStyleType.split("_")[1]);
-        if (currentLevel <= headerLevel) {
-          contentEnd = element.startIndex;
-          break;
-        }
-      }
-    }
-  }
-
-  if (contentStart === -1) {
-    throw new Error(`Section with header "${headerText}" not found.`);
-  }
-
-  if (contentEnd === -1) {
-    const lastElement = doc.body.content[doc.body.content.length - 1];
-    contentEnd = lastElement.endIndex - 1;
-  }
-
-  // 2. Build requests: delete existing content, then insert new content at the same position
-  const requests: any[] = [];
-  if (contentEnd > contentStart) {
-    requests.push({ deleteContentRange: { range: { startIndex: contentStart, endIndex: contentEnd } } });
-  }
-  requests.push(...markdownToBatchUpdates(newContentMarkdown, contentStart));
-
   return batchUpdate(documentId, requests, accessToken);
 }
 
-// Append text to the end of the document
+export async function replaceSection(
+  documentIdOrUrl: string,
+  headerText: string,
+  newContentMarkdown: string,
+  accessToken: string
+) {
+  const documentId = extractDocumentId(documentIdOrUrl);
+  const doc = await getDocument(documentId, accessToken);
+
+  const range = findSectionRange(doc, headerText);
+  if (!range) throw new Error(`Section with header "${headerText}" not found.`);
+
+  const requests: BatchUpdateRequest[] = [];
+  if (range.contentEnd > range.contentStart) {
+    requests.push({
+      deleteContentRange: { range: { startIndex: range.contentStart, endIndex: range.contentEnd } },
+    });
+  }
+  requests.push(...markdownToBatchUpdates(newContentMarkdown, range.contentStart));
+  return batchUpdate(documentId, requests, accessToken);
+}
+
 export async function appendText(documentIdOrUrl: string, newContentMarkdown: string, accessToken: string) {
   const documentId = extractDocumentId(documentIdOrUrl);
   const doc = await getDocument(documentId, accessToken);
-  
-  // Find the end of the document
-  const lastElement = doc.body.content[doc.body.content.length - 1];
-  // In Google Docs, you insert before the very last newline character (endIndex - 1)
-  const insertIndex = lastElement.endIndex - 1;
 
-  const insertRequests = markdownToBatchUpdates(newContentMarkdown, insertIndex);
-  return batchUpdate(documentId, insertRequests, accessToken);
+  const last = doc.body.content[doc.body.content.length - 1];
+  const insertIndex = last.endIndex - 1;
+
+  return batchUpdate(documentId, markdownToBatchUpdates(newContentMarkdown, insertIndex), accessToken);
 }

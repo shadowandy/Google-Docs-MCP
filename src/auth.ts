@@ -1,4 +1,5 @@
 import { Env } from "./types";
+import { BASE_SECURITY_HEADERS } from "./utils";
 
 // ── AES-GCM helpers ────────────────────────────────────────────────────────────
 
@@ -137,15 +138,12 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
     <p><a href="/auth/login">Try again</a></p>
   </body>
 </html>`, {
-        status: 403, headers: {
+        status: 403,
+        headers: {
           "Content-Type": "text/html; charset=utf-8",
           "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
-          "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-          "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
-          "X-Content-Type-Options": "nosniff",
-          "X-Frame-Options": "DENY",
-          "Referrer-Policy": "strict-origin-when-cross-origin",
-        }
+          ...BASE_SECURITY_HEADERS,
+        },
       });
     }
   }
@@ -215,11 +213,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
       "Content-Type": "text/html; charset=utf-8",
       "Cache-Control": "no-store",
       "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; form-action 'self'`,
-      "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-      "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
-      "X-Content-Type-Options": "nosniff",
-      "X-Frame-Options": "DENY",
-      "Referrer-Policy": "strict-origin-when-cross-origin",
+      ...BASE_SECURITY_HEADERS,
     }
   });
 }
