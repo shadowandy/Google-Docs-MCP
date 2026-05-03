@@ -1,5 +1,12 @@
 import { BatchUpdateRequest } from "./types";
 
+// Count Unicode code points, not UTF-16 code units.
+// Google Docs indexes are code-point offsets; JS .length gives UTF-16 units,
+// which differ for supplementary characters (emoji, CJK ext-B, etc.).
+function codePointLength(s: string): number {
+  return [...s].length;
+}
+
 function processInlineFormatting(input: string): { text: string; formatting: Array<{ start: number; end: number; style: any }> } {
   const formatting: Array<{ start: number; end: number; style: any }> = [];
   let result = '';
@@ -9,18 +16,18 @@ function processInlineFormatting(input: string): { text: string; formatting: Arr
     if (input[i] === '*' && input[i + 1] === '*') {
       const closeIdx = input.indexOf('**', i + 2);
       if (closeIdx !== -1) {
-        const start = result.length;
+        const start = codePointLength(result);
         result += input.slice(i + 2, closeIdx);
-        formatting.push({ start, end: result.length, style: { bold: true } });
+        formatting.push({ start, end: codePointLength(result), style: { bold: true } });
         i = closeIdx + 2;
         continue;
       }
     } else if (input[i] === '*') {
       const closeIdx = input.indexOf('*', i + 1);
       if (closeIdx !== -1) {
-        const start = result.length;
+        const start = codePointLength(result);
         result += input.slice(i + 1, closeIdx);
-        formatting.push({ start, end: result.length, style: { italic: true } });
+        formatting.push({ start, end: codePointLength(result), style: { italic: true } });
         i = closeIdx + 1;
         continue;
       }
@@ -86,7 +93,7 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
       });
     }
 
-    currentIndex += textToInsert.length;
+    currentIndex += codePointLength(textToInsert);
   }
 
   return requests;

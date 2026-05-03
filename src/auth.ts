@@ -106,7 +106,13 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
   });
 
   // F12: Don't surface raw OAuth error details to the browser
-  const tokens = await response.json() as any;
+  let tokens: any;
+  try {
+    tokens = await response.json();
+  } catch {
+    console.error("Token exchange: failed to parse JSON response");
+    return new Response("Authentication failed. Please try signing in again.", { status: 502 });
+  }
   if (tokens.error) {
     console.error("Token exchange error:", tokens.error, tokens.error_description);
     return new Response("Authentication failed. Please try signing in again.", { status: 400 });
