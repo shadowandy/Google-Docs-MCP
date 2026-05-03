@@ -7,6 +7,13 @@ export interface Env {
   MCP_SESSION: DurableObjectNamespace;
 }
 
+export interface ParagraphElement {
+  textRun?: {
+    content: string;
+    textStyle?: { bold?: boolean; italic?: boolean };
+  };
+}
+
 export interface GoogleDoc {
   documentId: string;
   title: string;
@@ -19,21 +26,12 @@ export interface GoogleDocElement {
   startIndex: number;
   endIndex: number;
   paragraph?: {
-    elements: Array<{
-      textRun?: {
-        content: string;
-        textStyle?: {
-          bold?: boolean;
-          italic?: boolean;
-        };
-      };
-    }>;
-    paragraphStyle?: {
-      namedStyleType: string;
-    };
+    elements: ParagraphElement[];
+    paragraphStyle?: { namedStyleType: string };
+    bullet?: unknown;
   };
-  table?: any; // Tables are complex, keeping as any for now but scoped
-  sectionBreak?: any;
+  table?: any; // Tables are complex; typed minimally for now
+  sectionBreak?: unknown;
 }
 
 export interface BatchUpdateRequest {
@@ -58,10 +56,55 @@ export interface BatchUpdateRequest {
     containsText: { text: string; matchCase: boolean };
     replaceText: string;
   };
+  createParagraphBullets?: {
+    range: { startIndex: number; endIndex: number };
+    bulletPreset: string;
+  };
 }
 
 export interface SectionInfo {
   level: number;
   text: string;
   startIndex: number;
+}
+
+// ── Google API response shapes ────────────────────────────────────────────────
+
+export interface OAuthTokenResponse {
+  access_token?: string;
+  refresh_token?: string;
+  expires_in?: number;
+  scope?: string;
+  token_type?: string;
+  error?: string;
+  error_description?: string;
+  // Fields appended after receipt:
+  expiry_date?: number;
+  createdAt?: number;
+  expiresAt?: number;
+}
+
+export interface DriveFile {
+  id: string;
+  name: string;
+  modifiedTime: string;
+}
+
+export interface DriveFileListResponse {
+  files?: DriveFile[];
+}
+
+export interface DocumentInfo {
+  documentId: string;
+  title: string;
+  revisionId: string;
+  documentStyle: unknown;
+  modifiedTime?: string;
+  size?: string;
+}
+
+export interface BatchUpdateResponse {
+  replies?: Array<{
+    replaceAllText?: { occurrencesChanged?: number };
+  }>;
 }

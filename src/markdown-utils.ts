@@ -1,4 +1,4 @@
-import { GoogleDoc } from "./types";
+import { GoogleDoc, GoogleDocElement, ParagraphElement } from "./types";
 
 export function docToMarkdown(doc: GoogleDoc): string {
   let markdown = "";
@@ -17,11 +17,11 @@ export function docToMarkdown(doc: GoogleDoc): string {
   return markdown;
 }
 
-function parseParagraph(paragraph: any): string {
+function parseParagraph(paragraph: NonNullable<GoogleDocElement["paragraph"]>): string {
   let text = "";
-  const style = paragraph.paragraphStyle?.namedStyleType || "NORMAL_TEXT";
-  
-  const content = paragraph.elements.map((el: any) => {
+  const style = paragraph.paragraphStyle?.namedStyleType ?? "NORMAL_TEXT";
+
+  const content = paragraph.elements.map((el: ParagraphElement) => {
     if (el.textRun) {
       let run = el.textRun.content;
       if (el.textRun.textStyle?.bold) run = `**${run}**`;

@@ -1,5 +1,5 @@
 import { markdownToBatchUpdates } from "./markdown-parser";
-import { GoogleDoc, BatchUpdateRequest, SectionInfo } from "./types";
+import { GoogleDoc, BatchUpdateRequest, BatchUpdateResponse, DocumentInfo, DriveFileListResponse, SectionInfo } from "./types";
 
 const DOC_ID_RE = /^[a-zA-Z0-9_-]{25,55}$/;
 
@@ -50,7 +50,7 @@ function findSectionRange(doc: GoogleDoc, headerText: string): SectionRange | nu
 
     const level = headingLevel(style);
     const text = element.paragraph!.elements
-      .map((e: any) => e.textRun?.content ?? "")
+      .map(e => e.textRun?.content ?? "")
       .join("")
       .trim();
 
@@ -100,7 +100,7 @@ export async function createDocument(title: string, accessToken: string): Promis
   if (!response.ok) {
     throw new Error(`Google Docs create error (${response.status}): ${await extractApiError(response)}`);
   }
-  const data = await response.json() as any;
+  const data = await response.json() as { documentId: string };
   return data.documentId;
 }
 
@@ -139,7 +139,7 @@ export function listSections(doc: GoogleDoc): SectionInfo[] {
     .map(el => ({
       level: headingLevel(el.paragraph!.paragraphStyle!.namedStyleType),
       text: el.paragraph!.elements
-        .map((e: any) => e.textRun?.content ?? "")
+        .map(e => e.textRun?.content ?? "")
         .join("")
         .replace(/\n$/, ""),
       startIndex: el.startIndex,
@@ -156,7 +156,7 @@ export async function getDocumentInfo(documentIdOrUrl: string, accessToken: stri
   if (!response.ok) {
     throw new Error(`Google Docs API error (${response.status}): ${await extractApiError(response)}`);
   }
-  const data = await response.json() as any;
+  const data = await response.json() as DocumentInfo;
 
   const driveFields = "id,name,modifiedTime,size";
   const driveResponse = await fetch(
@@ -166,7 +166,7 @@ export async function getDocumentInfo(documentIdOrUrl: string, accessToken: stri
   if (!driveResponse.ok) {
     console.warn(`Drive metadata fetch failed for ${documentId} (${driveResponse.status}) — modifiedTime and size unavailable`);
   } else {
-    const drive = await driveResponse.json() as any;
+    const drive = await driveResponse.json() as { modifiedTime?: string; size?: string };
     data.modifiedTime = drive.modifiedTime;
     data.size = drive.size;
   }
@@ -188,11 +188,11 @@ export async function findAndReplace(
       replaceText,
     },
   }];
-  const result = await batchUpdate(documentId, requests, accessToken) as any;
+  const result = await batchUpdate(documentId, requests, accessToken) as BatchUpdateResponse;
   return result.replies?.[0]?.replaceAllText?.occurrencesChanged ?? 0;
 }
 
-export async function listDocuments(accessToken: string, pageSize = 20) {
+export async function listDocuments(accessToken: string, pageSize = 20): Promise<DriveFileListResponse> {
   const q = "mimeType='application/vnd.google-apps.document' and trashed=false";
   const fields = "files(id,name,modifiedTime)";
   const url = `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=${encodeURIComponent(fields)}&orderBy=modifiedTime+desc&pageSize=${pageSize}`;
