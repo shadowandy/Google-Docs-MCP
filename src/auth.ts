@@ -1,4 +1,4 @@
-import { Env } from "./types";
+import { Env, OAuthTokenResponse } from "./types";
 import { BASE_SECURITY_HEADERS } from "./utils";
 
 // ── AES-GCM helpers ────────────────────────────────────────────────────────────
@@ -107,9 +107,9 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
   });
 
   // F12: Don't surface raw OAuth error details to the browser
-  let tokens: any;
+  let tokens: OAuthTokenResponse;
   try {
-    tokens = await response.json();
+    tokens = await response.json() as OAuthTokenResponse;
   } catch {
     console.error("Token exchange: failed to parse JSON response");
     return new Response("Authentication failed. Please try signing in again.", { status: 502 });
@@ -149,7 +149,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
   }
 
   // F14: Record access token expiry (Google) and our own 90-day session lifetime
-  tokens.expiry_date = Date.now() + (tokens.expires_in * 1000);
+  tokens.expiry_date = Date.now() + ((tokens.expires_in ?? 3600) * 1000);
   tokens.createdAt = Date.now();
   tokens.expiresAt = Date.now() + TOKEN_LIFETIME_MS;
 
@@ -222,9 +222,9 @@ export async function getAccessToken(userToken: string, env: Env): Promise<strin
   const data = await env.TOKENS.get(userToken);
   if (!data) return null;
 
-  let tokens: any;
+  let tokens: OAuthTokenResponse;
   try {
-    tokens = JSON.parse(await decryptData(data, env.TOKEN_ENCRYPTION_KEY));
+    tokens = JSON.parse(await decryptData(data, env.TOKEN_ENCRYPTION_KEY)) as OAuthTokenResponse;
   } catch {
     // Decryption failed — plaintext legacy entry or corrupted; require re-authentication
     return null;
@@ -251,7 +251,7 @@ export async function getAccessToken(userToken: string, env: Env): Promise<strin
         }),
       });
 
-      const newTokens = await response.json() as any;
+      const newTokens = await response.json() as OAuthTokenResponse;
       if (newTokens.error || !newTokens.access_token) {
         return null;
       }
@@ -263,5 +263,5 @@ export async function getAccessToken(userToken: string, env: Env): Promise<strin
     }
   }
 
-  return tokens.access_token;
+  return tokens.access_token ?? null;
 }

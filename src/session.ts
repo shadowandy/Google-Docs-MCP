@@ -162,9 +162,22 @@ export class MCPSession {
     }
   ];
 
+  // ─── Argument validation ──────────────────────────────────────────────────��──
+
+  private static requireString(args: Record<string, unknown>, key: string, maxLen = 10_000): string {
+    const val = args[key];
+    if (typeof val !== "string" || val.trim() === "") {
+      throw new McpError(ErrorCode.InvalidParams, `"${key}" must be a non-empty string`);
+    }
+    if (val.length > maxLen) {
+      throw new McpError(ErrorCode.InvalidParams, `"${key}" exceeds maximum length of ${maxLen} characters`);
+    }
+    return val;
+  }
+
   // ─── Tool call dispatcher (shared between SSE and Streamable HTTP) ───────────
 
-  private async dispatchToolCall(name: string, args: Record<string, any>): Promise<{ content: { type: string; text: string }[] }> {
+  private async dispatchToolCall(name: string, args: Record<string, unknown>): Promise<{ content: { type: string; text: string }[] }> {
     const userToken = await this.state.storage.get<string>("userToken");
     if (!userToken) throw new McpError(ErrorCode.InvalidRequest, "Session not initialised");
 
@@ -175,29 +188,32 @@ export class MCPSession {
       throw new McpError(ErrorCode.InvalidRequest, "Google API rate limit exceeded. Please wait before retrying.");
     }
 
+    const req = MCPSession.requireString;
+
     switch (name) {
       case "read_document": {
-        const doc = await getDocument(args.documentId, accessToken);
+        const doc = await getDocument(req(args, "documentId"), accessToken);
         return { content: [{ type: "text", text: docToMarkdown(doc) }] };
       }
       case "create_document": {
-        const documentId = await createDocument(args.title, accessToken);
+        const documentId = await createDocument(req(args, "title", 1000), accessToken);
         return { content: [{ type: "text", text: `Document created with ID: ${documentId}` }] };
       }
       case "search_documents": {
-        const results = await searchDocuments(args.query, accessToken);
+        const results = await searchDocuments(req(args, "query", 500), accessToken);
         return { content: [{ type: "text", text: JSON.stringify(results, null, 2) }] };
       }
       case "edit_section": {
-        await replaceSection(args.documentId, args.headerText, args.newContent, accessToken);
-        return { content: [{ type: "text", text: `Section "${args.headerText}" updated successfully.` }] };
+        const headerText = req(args, "headerText", 500);
+        await replaceSection(req(args, "documentId"), headerText, req(args, "newContent"), accessToken);
+        return { content: [{ type: "text", text: `Section "${headerText}" updated successfully.` }] };
       }
       case "append_text": {
-        await appendText(args.documentId, args.newContent, accessToken);
+        await appendText(req(args, "documentId"), req(args, "newContent"), accessToken);
         return { content: [{ type: "text", text: "Text successfully appended to the document." }] };
       }
       case "list_sections": {
-        const doc = await getDocument(args.documentId, accessToken);
+        const doc = await getDocument(req(args, "documentId"), accessToken);
         const sections = listSections(doc);
         if (sections.length === 0) {
           return { content: [{ type: "text", text: "No sections (headings) found in this document." }] };
@@ -208,21 +224,22 @@ export class MCPSession {
         return { content: [{ type: "text", text: formatted }] };
       }
       case "get_document_info": {
-        const info = await getDocumentInfo(args.documentId, accessToken);
+        const info = await getDocumentInfo(req(args, "documentId"), accessToken);
         return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
       }
       case "find_and_replace": {
+        const matchCase = typeof args.matchCase === "boolean" ? args.matchCase : false;
         const count = await findAndReplace(
-          args.documentId,
-          args.findText,
-          args.replaceText,
-          args.matchCase ?? false,
+          req(args, "documentId"),
+          req(args, "findText", 10_000),
+          req(args, "replaceText", 10_000),
+          matchCase,
           accessToken
         );
         return { content: [{ type: "text", text: `Replaced ${count} occurrence${count !== 1 ? "s" : ""}.` }] };
       }
       case "list_documents": {
-        const result = await listDocuments(accessToken) as any;
+        const result = await listDocuments(accessToken);
         const files = result.files ?? [];
         if (files.length === 0) {
           return { content: [{ type: "text", text: "No documents found." }] };
@@ -230,8 +247,9 @@ export class MCPSession {
         return { content: [{ type: "text", text: JSON.stringify(files, null, 2) }] };
       }
       case "delete_section": {
-        await deleteSection(args.documentId, args.headerText, accessToken);
-        return { content: [{ type: "text", text: `Section "${args.headerText}" deleted successfully.` }] };
+        const headerText = req(args, "headerText", 500);
+        await deleteSection(req(args, "documentId"), headerText, accessToken);
+        return { content: [{ type: "text", text: `Section "${headerText}" deleted successfully.` }] };
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${name}`);
@@ -254,9 +272,14 @@ export class MCPSession {
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       try {
+        const rawArgs = request.params.arguments;
+        if (rawArgs !== undefined && rawArgs !== null &&
+            (typeof rawArgs !== "object" || Array.isArray(rawArgs))) {
+          throw new McpError(ErrorCode.InvalidParams, "Tool arguments must be a plain object");
+        }
         return await this.dispatchToolCall(
           request.params.name,
-          request.params.arguments as Record<string, any>
+          (rawArgs ?? {}) as Record<string, unknown>
         );
       } catch (error: any) {
         if (error instanceof McpError) throw error;
@@ -267,6 +290,11 @@ export class MCPSession {
   }
 
   // ─── SSE server lifecycle ─────────────────────────────────────────────────────
+  // Two separate Server instances are intentional: the MCP SDK binds a Server to
+  // exactly one transport at a time. SSE uses a persistent stream (re-created on
+  // each new client connection), while Streamable HTTP is request-response (lives
+  // for the DO lifetime). Both call the same registerHandlers(), so adding a tool
+  // requires only one change in toolDefinitions + dispatchToolCall.
 
   private initializeSseServer(): Server {
     const server = new Server(

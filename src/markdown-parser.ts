@@ -53,15 +53,22 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
   for (const line of lines) {
     let stripped = line;
     let headerLevel = 0;
+    let isBullet = false;
 
     const headerMatch = line.match(/^(#{1,6})\s+(.*)$/);
+    const bulletMatch = line.match(/^[-*]\s+(.*)$/);
+
     if (headerMatch) {
       headerLevel = headerMatch[1].length;
       stripped = headerMatch[2];
+    } else if (bulletMatch) {
+      isBullet = true;
+      stripped = bulletMatch[1];
     }
 
     const { text: plainText, formatting } = processInlineFormatting(stripped);
     const textToInsert = plainText + "\n";
+    const insertedLen = codePointLength(textToInsert);
 
     requests.push({
       insertText: {
@@ -80,6 +87,15 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
       });
     }
 
+    if (isBullet) {
+      requests.push({
+        createParagraphBullets: {
+          range: { startIndex: currentIndex, endIndex: currentIndex + insertedLen },
+          bulletPreset: "BULLET_DISC_CIRCLE_SQUARE",
+        },
+      });
+    }
+
     for (const fmt of formatting) {
       requests.push({
         updateTextStyle: {
@@ -93,7 +109,7 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
       });
     }
 
-    currentIndex += codePointLength(textToInsert);
+    currentIndex += insertedLen;
   }
 
   return requests;

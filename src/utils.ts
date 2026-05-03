@@ -1,17 +1,32 @@
-// Fixed-window rate limiter backed by Cloudflare KV.
-// Returns false when the caller has exceeded `limit` requests in the current window.
-// Note: KV get+put is not atomic; counts may be slightly under-enforced under burst
-// concurrency, which is an acceptable trade-off for this use case.
+// Sliding-window counter rate limiter backed by Cloudflare KV.
+// Uses two adjacent fixed windows to approximate a rolling window, preventing
+// the 2× burst that a pure fixed-window allows at window boundaries.
+// Formula: weighted = prev * (1 − elapsed/window) + current
+// Note: KV get+put is not atomic; slight under-enforcement under concurrency is
+// an acceptable trade-off compared with a Redis INCR+EXPIRE atomic operation.
 export async function checkRateLimit(
   kv: KVNamespace,
   key: string,
   limit: number,
   windowSecs: number
 ): Promise<boolean> {
-  const windowKey = `rl:${key}:${Math.floor(Date.now() / (windowSecs * 1000))}`;
-  const current = parseInt((await kv.get(windowKey)) ?? "0");
-  if (current >= limit) return false;
-  await kv.put(windowKey, String(current + 1), { expirationTtl: windowSecs * 2 });
+  const now = Date.now();
+  const windowMs = windowSecs * 1000;
+  const currentWindow = Math.floor(now / windowMs);
+  const elapsed = now - currentWindow * windowMs;
+  const prevFraction = 1 - elapsed / windowMs;
+
+  const currentKey = `rl:${key}:${currentWindow}`;
+  const prevKey = `rl:${key}:${currentWindow - 1}`;
+
+  const [currentStr, prevStr] = await Promise.all([kv.get(currentKey), kv.get(prevKey)]);
+  const current = parseInt(currentStr ?? "0");
+  const prev = parseInt(prevStr ?? "0");
+
+  const weighted = prev * prevFraction + current;
+  if (weighted >= limit) return false;
+
+  await kv.put(currentKey, String(current + 1), { expirationTtl: windowSecs * 2 });
   return true;
 }
 
