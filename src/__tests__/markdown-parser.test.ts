@@ -125,6 +125,77 @@ describe("markdownToBatchUpdates", () => {
     expect(style!.updateTextStyle!.range.endIndex).toBe(2);
   });
 
+  // ── Bold-italic (***) ──────────────────────────────────────────────────────
+
+  it("***text*** produces both bold and italic on the same span", () => {
+    const reqs = markdownToBatchUpdates("***hi***", 0);
+    const styles = reqs.filter(r => r.updateTextStyle);
+    // The outer span covers the whole text with bold+italic
+    const outer = styles.find(r => r.updateTextStyle!.textStyle.bold && r.updateTextStyle!.textStyle.italic);
+    expect(outer).toBeDefined();
+    expect(outer!.updateTextStyle!.textStyle).toEqual({ bold: true, italic: true });
+  });
+
+  it("***text*** inserts the unwrapped text", () => {
+    const reqs = markdownToBatchUpdates("***hi***", 0);
+    const insert = reqs.find(r => r.insertText);
+    expect(insert!.insertText!.text).toBe("hi\n");
+  });
+
+  // ── Escaped asterisk ───────────────────────────────────────────────────────
+
+  it("\\* is treated as a literal asterisk, not a style marker", () => {
+    const reqs = markdownToBatchUpdates("\\*not italic\\*", 0);
+    const insert = reqs.find(r => r.insertText);
+    expect(insert!.insertText!.text).toBe("*not italic*\n");
+    expect(reqs.every(r => !r.updateTextStyle)).toBe(true);
+  });
+
+  it("\\\\ is treated as a literal backslash", () => {
+    const reqs = markdownToBatchUpdates("a\\\\b", 0);
+    const insert = reqs.find(r => r.insertText);
+    expect(insert!.insertText!.text).toBe("a\\b\n");
+  });
+
+  // ── Backtick code spans ────────────────────────────────────────────────────
+
+  it("`code` inserts the unwrapped text", () => {
+    const reqs = markdownToBatchUpdates("`hello`", 0);
+    const insert = reqs.find(r => r.insertText);
+    expect(insert!.insertText!.text).toBe("hello\n");
+  });
+
+  it("`code` produces updateTextStyle with weightedFontFamily Courier New", () => {
+    const reqs = markdownToBatchUpdates("`hello`", 0);
+    const style = reqs.find(r => r.updateTextStyle);
+    expect(style!.updateTextStyle!.textStyle.weightedFontFamily?.fontFamily).toBe("Courier New");
+    expect(style!.updateTextStyle!.fields).toBe("weightedFontFamily");
+  });
+
+  it("`code` range covers exactly the unwrapped text", () => {
+    const reqs = markdownToBatchUpdates("`hi`", 5);
+    const style = reqs.find(r => r.updateTextStyle);
+    expect(style!.updateTextStyle!.range.startIndex).toBe(5);
+    expect(style!.updateTextStyle!.range.endIndex).toBe(7); // 'hi' = 2 code points
+  });
+
+  // ── Nested formatting ──────────────────────────────────────────────────────
+
+  it("**outer *inner* outer** emits bold for full span and italic for inner", () => {
+    const reqs = markdownToBatchUpdates("**outer *inner* outer**", 0);
+    const insert = reqs.find(r => r.insertText);
+    expect(insert!.insertText!.text).toBe("outer inner outer\n");
+
+    const styles = reqs.filter(r => r.updateTextStyle);
+    const boldSpan = styles.find(r => r.updateTextStyle!.textStyle.bold);
+    expect(boldSpan!.updateTextStyle!.range.startIndex).toBe(0);
+    expect(boldSpan!.updateTextStyle!.range.endIndex).toBe(17); // 'outer inner outer'
+
+    const italicSpan = styles.find(r => r.updateTextStyle!.textStyle.italic);
+    expect(italicSpan!.updateTextStyle!.range.startIndex).toBe(6);  // after 'outer '
+    expect(italicSpan!.updateTextStyle!.range.endIndex).toBe(11);   // 'inner' = 5 chars
+  });
+
   // ── Input limits ───────────────────────────────────────────────────────────
 
   it("throws when content exceeds 100 KB", () => {

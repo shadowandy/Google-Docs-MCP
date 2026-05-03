@@ -71,7 +71,7 @@ function findSectionRange(doc: GoogleDoc, headerText: string): SectionRange | nu
 
 // ── Google Docs API calls ────────────────────────────────────────────────────
 
-export async function getDocument(documentIdOrUrl: string, accessToken: string): Promise<GoogleDoc> {
+export async function getDocumentBody(documentIdOrUrl: string, accessToken: string): Promise<GoogleDoc> {
   const documentId = extractDocumentId(documentIdOrUrl);
   const response = await fetch(`https://docs.googleapis.com/v1/documents/${documentId}`, {
     headers: { Authorization: `Bearer ${accessToken}` },
@@ -207,7 +207,7 @@ export async function listDocuments(accessToken: string, pageSize = 20): Promise
 
 export async function deleteSection(documentIdOrUrl: string, headerText: string, accessToken: string) {
   const documentId = extractDocumentId(documentIdOrUrl);
-  const doc = await getDocument(documentId, accessToken);
+  const doc = await getDocumentBody(documentId, accessToken);
 
   const range = findSectionRange(doc, headerText);
   if (!range) throw new Error(`Section with header "${headerText}" not found.`);
@@ -225,7 +225,7 @@ export async function replaceSection(
   accessToken: string
 ) {
   const documentId = extractDocumentId(documentIdOrUrl);
-  const doc = await getDocument(documentId, accessToken);
+  const doc = await getDocumentBody(documentId, accessToken);
 
   const range = findSectionRange(doc, headerText);
   if (!range) throw new Error(`Section with header "${headerText}" not found.`);
@@ -242,7 +242,7 @@ export async function replaceSection(
 
 export async function appendText(documentIdOrUrl: string, newContentMarkdown: string, accessToken: string) {
   const documentId = extractDocumentId(documentIdOrUrl);
-  const doc = await getDocument(documentId, accessToken);
+  const doc = await getDocumentBody(documentId, accessToken);
 
   const last = doc.body.content[doc.body.content.length - 1];
   const insertIndex = last.endIndex - 1;
