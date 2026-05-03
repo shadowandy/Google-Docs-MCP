@@ -52,7 +52,7 @@ class CloudflareSSEServerTransport implements Transport {
   }
 
   handleSseRequest(): Response {
-    let keepAliveInterval: any;
+    let keepAliveInterval: ReturnType<typeof setInterval>;
 
     const stream = new ReadableStream({
       start: (controller) => {
@@ -133,11 +133,19 @@ class OneShotTransport implements Transport {
   }
 
   /** Send a message and await the server's JSON-RPC response, or null for notifications. */
-  processMessage(message: JSONRPCMessage): Promise<JSONRPCMessage | null> {
+  processMessage(message: JSONRPCMessage, timeoutMs = 30_000): Promise<JSONRPCMessage | null> {
     const id = (message as any).id;
     if (id != null) {
-      return new Promise<JSONRPCMessage>((resolve) => {
-        this._pendingResolvers.set(id, resolve);
+      return new Promise<JSONRPCMessage>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (this._pendingResolvers.delete(id)) {
+            reject(new Error(`Timeout waiting for response to request id=${String(id)}`));
+          }
+        }, timeoutMs);
+        this._pendingResolvers.set(id, (msg) => {
+          clearTimeout(timer);
+          resolve(msg);
+        });
         this.onmessage?.(message);
       });
     }
@@ -166,8 +174,7 @@ export class MCPSession {
 
   // ─── Tool definitions ────────────────────────────────────────────────────────
 
-  private get toolDefinitions() {
-    return [
+  private static readonly toolDefinitions = [
       {
         name: "read_document",
         description: "Read a Google Document and return its full content as Markdown",
@@ -293,8 +300,7 @@ export class MCPSession {
           required: ["documentId", "headerText"]
         }
       }
-    ];
-  }
+  ];
 
   // ─── Tool call dispatcher (shared between SSE and Streamable HTTP) ───────────
 
@@ -385,7 +391,7 @@ export class MCPSession {
       const valid = await this.env.TOKENS.get(userToken);
       if (!valid) throw new McpError(ErrorCode.InvalidRequest, "Session revoked or expired");
 
-      return { tools: this.toolDefinitions };
+      return { tools: MCPSession.toolDefinitions };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -510,8 +516,11 @@ export class MCPSession {
         }
 
         if (request.method === "POST") {
-          // Store token so tool calls can use it
-          await this.state.storage.put("userToken", userToken);
+          // Store token so tool calls can use it — write only when the value changes
+          const storedToken = await this.state.storage.get<string>("userToken");
+          if (storedToken !== userToken) {
+            await this.state.storage.put("userToken", userToken);
+          }
           return this.handleStreamablePost(request, userToken);
         }
 
