@@ -93,22 +93,37 @@ describe("docToMarkdown", () => {
     expect(md).toContain("* item");
   });
 
-  it("renders a table as a pipe-delimited block", () => {
+  it("renders a table as a pipe-delimited block with a separator row after the header", () => {
     const tableElement: GoogleDocElement = {
       startIndex: 1,
       endIndex: 10,
       table: {
-        tableRows: [{
-          tableCells: [
-            { content: [{ paragraph: { elements: [{ textRun: { content: "A" } }] } }] },
-            { content: [{ paragraph: { elements: [{ textRun: { content: "B" } }] } }] },
-          ],
-        }],
+        tableRows: [
+          {
+            tableCells: [
+              { content: [{ paragraph: { elements: [{ textRun: { content: "H1" } }] } }] },
+              { content: [{ paragraph: { elements: [{ textRun: { content: "H2" } }] } }] },
+            ],
+          },
+          {
+            tableCells: [
+              { content: [{ paragraph: { elements: [{ textRun: { content: "A" } }] } }] },
+              { content: [{ paragraph: { elements: [{ textRun: { content: "B" } }] } }] },
+            ],
+          },
+        ],
       },
     };
     const md = docToMarkdown(doc("T", tableElement));
-    expect(md).toContain("| A |");
-    expect(md).toContain("| B |");
+    expect(md).toContain("| H1 | H2 |");
+    expect(md).toContain("| --- | --- |");
+    expect(md).toContain("| A | B |");
+    // Separator must appear between header and data row
+    const headerPos = md.indexOf("| H1 | H2 |");
+    const sepPos    = md.indexOf("| --- | --- |");
+    const dataPos   = md.indexOf("| A | B |");
+    expect(headerPos).toBeLessThan(sepPos);
+    expect(sepPos).toBeLessThan(dataPos);
   });
 
   it("processes multiple elements in document order", () => {

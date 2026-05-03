@@ -109,6 +109,119 @@ function processInlineFormatting(input: string): { text: string; formatting: For
   return { text: result, formatting };
 }
 
+// Returns true for markdown table separator rows like | --- | :---: | ----: |
+function isSeparatorRow(line: string): boolean {
+  return /^\|(?:[ \t]*:?-+:?[ \t]*\|)+$/.test(line.trim());
+}
+
+function parsePipeRow(line: string): string[] {
+  return line.split('|').slice(1, -1).map(cell => cell.trim());
+}
+
+// Emit updateTextStyle requests for a set of inline formatting spans.
+// Positions are absolute document indices (cellIndex + span offset).
+function emitInlineStyleRequests(
+  formatting: FormattingSpan[],
+  baseIndex: number,
+  out: BatchUpdateRequest[]
+): void {
+  for (const fmt of formatting) {
+    const { code, bold, italic } = fmt.style;
+    if (code) {
+      out.push({
+        updateTextStyle: {
+          range: { startIndex: baseIndex + fmt.start, endIndex: baseIndex + fmt.end },
+          textStyle: { weightedFontFamily: { fontFamily: "Courier New", weight: 400 } },
+          fields: "weightedFontFamily",
+        },
+      });
+    } else {
+      const textStyle: { bold?: boolean; italic?: boolean } = {};
+      const fields: string[] = [];
+      if (bold)   { textStyle.bold   = true; fields.push("bold"); }
+      if (italic) { textStyle.italic = true; fields.push("italic"); }
+      if (fields.length > 0) {
+        out.push({
+          updateTextStyle: {
+            range: { startIndex: baseIndex + fmt.start, endIndex: baseIndex + fmt.end },
+            textStyle,
+            fields: fields.join(","),
+          },
+        });
+      }
+    }
+  }
+}
+
+// Convert a block of pipe-table lines into batch update requests.
+//
+// Google Docs table index layout (after insertTable at I, R rows × C cols):
+//   I      : structural marker before first row
+//   I+1+r*(C+1)+c : content of cell (r, c)  — one "\n" per empty cell
+//   I+1+r*(C+1)+C : row-end structural marker for row r
+//   I+1+R*(C+1)   : structural marker after last row
+// Total empty-table size = 2 + R*(C+1)
+//
+// Cells are filled in reverse document order so each insertion is at a
+// higher index than all later insertions, keeping base positions stable.
+function processTableBlock(
+  lines: string[],
+  startIndex: number
+): { requests: BatchUpdateRequest[]; indexAdvance: number } {
+  const rows = lines
+    .filter(line => !isSeparatorRow(line))
+    .map(line => parsePipeRow(line));
+
+  if (rows.length === 0) return { requests: [], indexAdvance: 0 };
+
+  const numRows = rows.length;
+  const numCols = Math.max(...rows.map(r => r.length));
+
+  // Pad all rows to the same column count
+  const grid = rows.map(r => {
+    const padded = [...r];
+    while (padded.length < numCols) padded.push('');
+    return padded;
+  });
+
+  const requests: BatchUpdateRequest[] = [];
+
+  requests.push({
+    insertTable: {
+      rows: numRows,
+      columns: numCols,
+      location: { index: startIndex },
+    },
+  });
+
+  let totalContentCodePoints = 0;
+
+  for (let r = numRows - 1; r >= 0; r--) {
+    for (let c = numCols - 1; c >= 0; c--) {
+      const { text: plainText, formatting } = processInlineFormatting(grid[r][c]);
+      totalContentCodePoints += codePointLength(plainText);
+
+      if (!plainText) continue;
+
+      const cellIndex = startIndex + 1 + r * (numCols + 1) + c;
+
+      requests.push({
+        insertText: {
+          location: { index: cellIndex },
+          text: plainText,
+        },
+      });
+
+      emitInlineStyleRequests(formatting, cellIndex, requests);
+    }
+  }
+
+  // Empty table occupies 2 + R*(C+1) indices; cell content adds on top.
+  const indexAdvance = 2 + numRows * (numCols + 1) + totalContentCodePoints;
+
+  return { requests, indexAdvance };
+}
+
 export function markdownToBatchUpdates(text: string, startIndex: number): BatchUpdateRequest[] {
   if (new TextEncoder().encode(text).length > 100 * 1024) {
     throw new Error("Markdown content exceeds 100 KB limit");
@@ -119,8 +232,25 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
     throw new Error("Markdown content exceeds 5000 line limit");
   }
   let currentIndex = startIndex;
+  let i = 0;
 
-  for (const line of lines) {
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // ── Table block: collect all consecutive pipe lines ───────────────────────
+    if (line.trimStart().startsWith('|')) {
+      const tableLines: string[] = [];
+      while (i < lines.length && lines[i].trimStart().startsWith('|')) {
+        tableLines.push(lines[i]);
+        i++;
+      }
+      const { requests: tableReqs, indexAdvance } = processTableBlock(tableLines, currentIndex);
+      requests.push(...tableReqs);
+      currentIndex += indexAdvance;
+      continue;
+    }
+
+    // ── Normal line ───────────────────────────────────────────────────────────
     let stripped = line;
     let headerLevel = 0;
     let isBullet = false;
@@ -166,34 +296,10 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
       });
     }
 
-    for (const fmt of formatting) {
-      const { code, bold, italic } = fmt.style;
-      if (code) {
-        requests.push({
-          updateTextStyle: {
-            range: { startIndex: currentIndex + fmt.start, endIndex: currentIndex + fmt.end },
-            textStyle: { weightedFontFamily: { fontFamily: "Courier New", weight: 400 } },
-            fields: "weightedFontFamily",
-          },
-        });
-      } else {
-        const textStyle: { bold?: boolean; italic?: boolean } = {};
-        const fields: string[] = [];
-        if (bold) { textStyle.bold = true; fields.push("bold"); }
-        if (italic) { textStyle.italic = true; fields.push("italic"); }
-        if (fields.length > 0) {
-          requests.push({
-            updateTextStyle: {
-              range: { startIndex: currentIndex + fmt.start, endIndex: currentIndex + fmt.end },
-              textStyle,
-              fields: fields.join(","),
-            },
-          });
-        }
-      }
-    }
+    emitInlineStyleRequests(formatting, currentIndex, requests);
 
     currentIndex += insertedLen;
+    i++;
   }
 
   return requests;

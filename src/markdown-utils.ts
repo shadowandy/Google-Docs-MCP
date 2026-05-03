@@ -44,16 +44,19 @@ function parseParagraph(paragraph: NonNullable<GoogleDocElement["paragraph"]>): 
 
 function parseTable(table: GoogleTable): string {
   let text = "\n";
-  for (const row of table.tableRows) {
-    text += "|";
-    for (const cell of row.tableCells) {
-      const cellText = cell.content.map(c => {
+  for (let rowIndex = 0; rowIndex < table.tableRows.length; rowIndex++) {
+    const row = table.tableRows[rowIndex];
+    const cells: string[] = row.tableCells.map(cell =>
+      cell.content.map(c => {
         if (c.paragraph) return c.paragraph.elements.map(el => el.textRun?.content ?? "").join("").trim();
         return "";
-      }).join(" ");
-      text += ` ${cellText} |`;
+      }).join(" ")
+    );
+    text += "| " + cells.join(" | ") + " |\n";
+    // Add a separator row after the header (first row) for valid markdown tables
+    if (rowIndex === 0) {
+      text += "| " + cells.map(() => "---").join(" | ") + " |\n";
     }
-    text += "\n";
   }
   text += "\n";
   return text;

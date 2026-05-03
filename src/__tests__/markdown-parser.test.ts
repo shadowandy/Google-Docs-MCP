@@ -197,6 +197,66 @@ describe("markdownToBatchUpdates", () => {
     expect(italicSpan!.updateTextStyle!.range.endIndex).toBe(11);   // 'inner' = 5 chars
   });
 
+  // ── Tables ────────────────────────────────────────────────────────────────
+
+  it("table: produces an insertTable request with correct rows and columns", () => {
+    const reqs = markdownToBatchUpdates("| A | B |\n| --- | --- |\n| C | D |", 0);
+    const tbl = reqs.find(r => r.insertTable);
+    expect(tbl!.insertTable).toEqual({ rows: 2, columns: 2, location: { index: 0 } });
+  });
+
+  it("table: skips separator rows when counting content rows", () => {
+    const reqs = markdownToBatchUpdates("| H1 | H2 |\n|---|---|\n| R1 | R2 |", 0);
+    const tbl = reqs.find(r => r.insertTable);
+    expect(tbl!.insertTable!.rows).toBe(2); // header + 1 data row, not 3
+  });
+
+  it("table: inserts cell text for each non-empty cell", () => {
+    const reqs = markdownToBatchUpdates("| A | B |", 0);
+    const inserts = reqs.filter(r => r.insertText);
+    const texts = inserts.map(r => r.insertText!.text);
+    expect(texts).toContain("A");
+    expect(texts).toContain("B");
+  });
+
+  it("table: cell (0,0) text is inserted at startIndex + 1", () => {
+    // Cell (r,c) base index = startIndex + 1 + r*(numCols+1) + c
+    // For 1x2 table at index 5: cell(0,0) = 5+1+0+0 = 6
+    const reqs = markdownToBatchUpdates("| A | B |", 5);
+    const insertA = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "A");
+    expect(insertA!.insertText!.location.index).toBe(6);
+  });
+
+  it("table: cell (0,1) text is inserted at startIndex + 2", () => {
+    // For 1x2 at index 5: cell(0,1) = 5+1+0+1 = 7
+    const reqs = markdownToBatchUpdates("| A | B |", 5);
+    const insertB = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "B");
+    expect(insertB!.insertText!.location.index).toBe(7);
+  });
+
+  it("table: cell inserts are ordered last-cell-first (reverse document order)", () => {
+    const reqs = markdownToBatchUpdates("| A | B |", 0);
+    const inserts = reqs.filter(r => r.insertText);
+    // B (index 2) should appear before A (index 1) in the request list
+    const idxB = inserts.findIndex(r => r.insertText!.text === "B");
+    const idxA = inserts.findIndex(r => r.insertText!.text === "A");
+    expect(idxB).toBeLessThan(idxA);
+  });
+
+  it("table: inline bold in a cell emits updateTextStyle on the cell content", () => {
+    const reqs = markdownToBatchUpdates("| **bold** | plain |", 0);
+    const style = reqs.find(r => r.updateTextStyle?.textStyle.bold);
+    expect(style).toBeDefined();
+  });
+
+  it("table: content after a table starts at the correct index", () => {
+    // 1-row 2-col table at index 0:
+    // Empty table size = 2 + 1*(2+1) = 5; "A"=1, "B"=1 → advance = 5+2 = 7
+    const reqs = markdownToBatchUpdates("| A | B |\nafter", 0);
+    const afterInsert = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "after\n");
+    expect(afterInsert!.insertText!.location.index).toBe(7);
+  });
+
   // ── Input limits ───────────────────────────────────────────────────────────
 
   it("throws when content exceeds 100 KB", () => {
