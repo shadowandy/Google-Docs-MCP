@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { docToMarkdown } from "../markdown-utils";
+import { docToMarkdown, elementsToMarkdown } from "../markdown-utils";
 import type { GoogleDoc, GoogleDocElement } from "../types";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -28,6 +28,32 @@ function para(
 function doc(title: string, ...elements: GoogleDocElement[]): GoogleDoc {
   return { documentId: "test-id", title, body: { content: elements } };
 }
+
+// ── elementsToMarkdown ────────────────────────────────────────────────────────
+
+describe("elementsToMarkdown", () => {
+  it("returns empty string for an empty element list", () => {
+    expect(elementsToMarkdown([])).toBe("");
+  });
+
+  it("renders a subset of elements without a document title prefix", () => {
+    const elements = [
+      para("Section", "HEADING_2"),
+      para("body text"),
+    ];
+    const md = elementsToMarkdown(elements);
+    expect(md).not.toMatch(/^#[^#]/); // no H1 title prepended
+    expect(md).toContain("## Section");
+    expect(md).toContain("body text");
+  });
+
+  it("produces the same body as docToMarkdown minus the title line", () => {
+    const d = doc("Title", para("Hello", "HEADING_1"), para("world"));
+    const full = docToMarkdown(d);
+    const body = elementsToMarkdown(d.body.content);
+    expect(full).toBe(`# Title\n\n${body}`);
+  });
+});
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 

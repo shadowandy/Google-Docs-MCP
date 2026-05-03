@@ -147,15 +147,15 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
       },
     });
 
-    if (headerLevel > 0) {
-      requests.push({
-        updateParagraphStyle: {
-          range: { startIndex: currentIndex, endIndex: currentIndex + 1 },
-          paragraphStyle: { namedStyleType: `HEADING_${headerLevel}` },
-          fields: "namedStyleType",
-        },
-      });
-    }
+    // Always set paragraph style explicitly to prevent inheriting the style
+    // of the preceding paragraph (e.g. heading style bleeding into body text).
+    requests.push({
+      updateParagraphStyle: {
+        range: { startIndex: currentIndex, endIndex: currentIndex + 1 },
+        paragraphStyle: { namedStyleType: headerLevel > 0 ? `HEADING_${headerLevel}` : "NORMAL_TEXT" },
+        fields: "namedStyleType",
+      },
+    });
 
     if (isBullet) {
       requests.push({

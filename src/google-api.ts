@@ -1,4 +1,5 @@
 import { markdownToBatchUpdates } from "./markdown-parser";
+import { elementsToMarkdown } from "./markdown-utils";
 import { GoogleDoc, BatchUpdateRequest, BatchUpdateResponse, DocumentInfo, DriveFileListResponse, SectionInfo } from "./types";
 
 const DOC_ID_RE = /^[a-zA-Z0-9_-]{25,55}$/;
@@ -38,6 +39,8 @@ interface SectionRange {
   contentStart: number;
   /** startIndex of the next same-or-higher heading, or doc endIndex − 1 */
   contentEnd: number;
+  /** heading level (1–6) */
+  level: number;
 }
 
 function findSectionRange(doc: GoogleDoc, headerText: string): SectionRange | null {
@@ -59,14 +62,14 @@ function findSectionRange(doc: GoogleDoc, headerText: string): SectionRange | nu
         found = { level, headerStart: element.startIndex, contentStart: element.endIndex };
       }
     } else if (level <= found.level) {
-      return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: element.startIndex };
+      return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: element.startIndex, level: found.level };
     }
   }
 
   if (!found) return null;
 
   const last = doc.body.content[doc.body.content.length - 1];
-  return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: last.endIndex - 1 };
+  return { headerStart: found.headerStart, contentStart: found.contentStart, contentEnd: last.endIndex - 1, level: found.level };
 }
 
 // ── Google Docs API calls ────────────────────────────────────────────────────
@@ -248,4 +251,62 @@ export async function appendText(documentIdOrUrl: string, newContentMarkdown: st
   const insertIndex = last.endIndex - 1;
 
   return batchUpdate(documentId, markdownToBatchUpdates(newContentMarkdown, insertIndex), accessToken);
+}
+
+export async function readSection(documentIdOrUrl: string, headerText: string, accessToken: string): Promise<string> {
+  const documentId = extractDocumentId(documentIdOrUrl);
+  const doc = await getDocumentBody(documentId, accessToken);
+
+  const range = findSectionRange(doc, headerText);
+  if (!range) throw new Error(`Section with header "${headerText}" not found.`);
+
+  const elements = doc.body.content.filter(
+    el => el.startIndex >= range.headerStart && el.startIndex < range.contentEnd
+  );
+  return elementsToMarkdown(elements);
+}
+
+export async function insertSection(
+  documentIdOrUrl: string,
+  headerText: string,
+  position: "before" | "after",
+  newContentMarkdown: string,
+  accessToken: string
+) {
+  const documentId = extractDocumentId(documentIdOrUrl);
+  const doc = await getDocumentBody(documentId, accessToken);
+
+  const range = findSectionRange(doc, headerText);
+  if (!range) throw new Error(`Section with header "${headerText}" not found.`);
+
+  const insertIndex = position === "before" ? range.headerStart : range.contentEnd;
+  return batchUpdate(documentId, markdownToBatchUpdates(newContentMarkdown, insertIndex), accessToken);
+}
+
+export async function renameSection(
+  documentIdOrUrl: string,
+  headerText: string,
+  newHeaderText: string,
+  accessToken: string
+) {
+  const documentId = extractDocumentId(documentIdOrUrl);
+  const doc = await getDocumentBody(documentId, accessToken);
+
+  const range = findSectionRange(doc, headerText);
+  if (!range) throw new Error(`Section with header "${headerText}" not found.`);
+
+  // Delete the heading text only (not the paragraph separator at contentStart - 1),
+  // insert the new text, then re-apply the original heading level.
+  const requests: BatchUpdateRequest[] = [
+    { deleteContentRange: { range: { startIndex: range.headerStart, endIndex: range.contentStart - 1 } } },
+    { insertText: { location: { index: range.headerStart }, text: newHeaderText } },
+    {
+      updateParagraphStyle: {
+        range: { startIndex: range.headerStart, endIndex: range.headerStart + 1 },
+        paragraphStyle: { namedStyleType: `HEADING_${range.level}` },
+        fields: "namedStyleType",
+      },
+    },
+  ];
+  return batchUpdate(documentId, requests, accessToken);
 }

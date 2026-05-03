@@ -1,18 +1,19 @@
 import { GoogleDoc, GoogleDocElement, GoogleTable, ParagraphElement } from "./types";
 
-export function docToMarkdown(doc: GoogleDoc): string {
+export function elementsToMarkdown(elements: GoogleDocElement[]): string {
   let markdown = "";
-  markdown += `# ${doc.title}\n\n`;
-
-  for (const element of doc.body.content) {
+  for (const element of elements) {
     if (element.paragraph) {
       markdown += parseParagraph(element.paragraph);
     } else if (element.table) {
       markdown += parseTable(element.table);
     }
   }
-
   return markdown;
+}
+
+export function docToMarkdown(doc: GoogleDoc): string {
+  return `# ${doc.title}\n\n` + elementsToMarkdown(doc.body.content);
 }
 
 function parseParagraph(paragraph: NonNullable<GoogleDocElement["paragraph"]>): string {
