@@ -80,6 +80,11 @@ export interface BatchUpdateRequest {
     range: { startIndex: number; endIndex: number };
     bulletPreset: string;
   };
+  insertTable?: {
+    rows: number;
+    columns: number;
+    location: { index: number };
+  };
 }
 
 export interface SectionInfo {
