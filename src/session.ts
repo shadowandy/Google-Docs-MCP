@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { getAccessToken } from "./auth";
 import { Env } from "./types";
-import { getDocumentBody, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection } from "./google-api";
+import { getDocumentBody, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection, readSection, insertSection, renameSection } from "./google-api";
 import { docToMarkdown } from "./markdown-utils";
 import { checkRateLimit, tokenTag } from "./utils";
 import { CloudflareSSEServerTransport } from "./transports/sse";
@@ -159,6 +159,48 @@ export class MCPSession {
         },
         required: ["documentId", "headerText"]
       }
+    },
+    {
+      name: "read_section",
+      description: "Read the content of a specific section in a Google Document and return it as Markdown. Includes the heading and all content beneath it up to the next same-or-higher-level heading.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          headerText: { type: "string", description: "The exact header text of the section to read" }
+        },
+        required: ["documentId", "headerText"]
+      }
+    },
+    {
+      name: "insert_section",
+      description: "Insert a new section immediately before or after an existing section in a Google Document. The new content should include its own heading.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          headerText: { type: "string", description: "The exact header text of the reference section" },
+          position: { type: "string", enum: ["before", "after"], description: "Whether to insert before or after the reference section" },
+          newContent: { type: "string", description: "The Markdown content to insert, including its own heading" }
+        },
+        required: ["documentId", "headerText", "position", "newContent"]
+      }
+    },
+    {
+      name: "rename_section",
+      description: "Rename the heading of an existing section in a Google Document. The heading level (H1, H2, etc.) is preserved; only the text changes.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          headerText: { type: "string", description: "The exact current heading text of the section to rename" },
+          newHeaderText: { type: "string", description: "The new heading text" }
+        },
+        required: ["documentId", "headerText", "newHeaderText"]
+      }
     }
   ];
 
@@ -250,6 +292,26 @@ export class MCPSession {
         const headerText = req(args, "headerText", 500);
         await deleteSection(req(args, "documentId"), headerText, accessToken);
         return { content: [{ type: "text", text: `Section "${headerText}" deleted successfully.` }] };
+      }
+      case "read_section": {
+        const headerText = req(args, "headerText", 500);
+        const content = await readSection(req(args, "documentId"), headerText, accessToken);
+        return { content: [{ type: "text", text: content }] };
+      }
+      case "insert_section": {
+        const headerText = req(args, "headerText", 500);
+        const positionRaw = req(args, "position", 10);
+        if (positionRaw !== "before" && positionRaw !== "after") {
+          throw new McpError(ErrorCode.InvalidParams, '"position" must be "before" or "after"');
+        }
+        await insertSection(req(args, "documentId"), headerText, positionRaw, req(args, "newContent"), accessToken);
+        return { content: [{ type: "text", text: `New section inserted ${positionRaw} "${headerText}".` }] };
+      }
+      case "rename_section": {
+        const headerText = req(args, "headerText", 500);
+        const newHeaderText = req(args, "newHeaderText", 500);
+        await renameSection(req(args, "documentId"), headerText, newHeaderText, accessToken);
+        return { content: [{ type: "text", text: `Section renamed from "${headerText}" to "${newHeaderText}".` }] };
       }
       default:
         throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${name}`);
