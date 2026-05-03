@@ -8,7 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { getAccessToken } from "./auth";
 import { Env } from "./types";
-import { getDocument, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection } from "./google-api";
+import { getDocumentBody, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection } from "./google-api";
 import { docToMarkdown } from "./markdown-utils";
 import { checkRateLimit, tokenTag } from "./utils";
 import { CloudflareSSEServerTransport } from "./transports/sse";
@@ -192,7 +192,7 @@ export class MCPSession {
 
     switch (name) {
       case "read_document": {
-        const doc = await getDocument(req(args, "documentId"), accessToken);
+        const doc = await getDocumentBody(req(args, "documentId"), accessToken);
         return { content: [{ type: "text", text: docToMarkdown(doc) }] };
       }
       case "create_document": {
@@ -213,7 +213,7 @@ export class MCPSession {
         return { content: [{ type: "text", text: "Text successfully appended to the document." }] };
       }
       case "list_sections": {
-        const doc = await getDocument(req(args, "documentId"), accessToken);
+        const doc = await getDocumentBody(req(args, "documentId"), accessToken);
         const sections = listSections(doc);
         if (sections.length === 0) {
           return { content: [{ type: "text", text: "No sections (headings) found in this document." }] };

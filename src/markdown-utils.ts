@@ -1,4 +1,4 @@
-import { GoogleDoc, GoogleDocElement, ParagraphElement } from "./types";
+import { GoogleDoc, GoogleDocElement, GoogleTable, ParagraphElement } from "./types";
 
 export function docToMarkdown(doc: GoogleDoc): string {
   let markdown = "";
@@ -9,8 +9,6 @@ export function docToMarkdown(doc: GoogleDoc): string {
       markdown += parseParagraph(element.paragraph);
     } else if (element.table) {
       markdown += parseTable(element.table);
-    } else if (element.sectionBreak) {
-      // Ignore or add separator
     }
   }
 
@@ -43,13 +41,13 @@ function parseParagraph(paragraph: NonNullable<GoogleDocElement["paragraph"]>): 
   return text;
 }
 
-function parseTable(table: any): string {
+function parseTable(table: GoogleTable): string {
   let text = "\n";
   for (const row of table.tableRows) {
     text += "|";
     for (const cell of row.tableCells) {
-      const cellText = cell.content.map((c: any) => {
-        if (c.paragraph) return c.paragraph.elements.map((el: any) => el.textRun?.content || "").join("").trim();
+      const cellText = cell.content.map(c => {
+        if (c.paragraph) return c.paragraph.elements.map(el => el.textRun?.content ?? "").join("").trim();
         return "";
       }).join(" ");
       text += ` ${cellText} |`;

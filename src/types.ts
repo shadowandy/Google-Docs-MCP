@@ -22,6 +22,22 @@ export interface GoogleDoc {
   };
 }
 
+export interface TableCellContent {
+  paragraph?: { elements: ParagraphElement[] };
+}
+
+export interface TableCell {
+  content: TableCellContent[];
+}
+
+export interface TableRow {
+  tableCells: TableCell[];
+}
+
+export interface GoogleTable {
+  tableRows: TableRow[];
+}
+
 export interface GoogleDocElement {
   startIndex: number;
   endIndex: number;
@@ -30,7 +46,7 @@ export interface GoogleDocElement {
     paragraphStyle?: { namedStyleType: string };
     bullet?: unknown;
   };
-  table?: any; // Tables are complex; typed minimally for now
+  table?: GoogleTable;
   sectionBreak?: unknown;
 }
 
@@ -41,7 +57,11 @@ export interface BatchUpdateRequest {
   };
   updateTextStyle?: {
     range: { startIndex: number; endIndex: number };
-    textStyle: { bold?: boolean; italic?: boolean };
+    textStyle: {
+      bold?: boolean;
+      italic?: boolean;
+      weightedFontFamily?: { fontFamily: string; weight?: number };
+    };
     fields: string;
   };
   updateParagraphStyle?: {

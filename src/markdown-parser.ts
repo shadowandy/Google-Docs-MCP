@@ -7,31 +7,101 @@ function codePointLength(s: string): number {
   return [...s].length;
 }
 
-function processInlineFormatting(input: string): { text: string; formatting: Array<{ start: number; end: number; style: any }> } {
-  const formatting: Array<{ start: number; end: number; style: any }> = [];
+interface InlineStyle {
+  bold?: boolean;
+  italic?: boolean;
+  code?: boolean;
+}
+
+interface FormattingSpan {
+  start: number;
+  end: number;
+  style: InlineStyle;
+}
+
+// Processes inline markdown within a single line, returning plain text and
+// a list of style spans with code-point offsets relative to the start of that text.
+// Handles: **bold**, *italic*, ***bold-italic***, `code`, \* escape.
+// Nested styles (e.g. **bold *and italic* bold**) are supported one level deep.
+function processInlineFormatting(input: string): { text: string; formatting: FormattingSpan[] } {
+  const formatting: FormattingSpan[] = [];
   let result = '';
   let i = 0;
 
   while (i < input.length) {
+    // Backslash escape: \* \` \\
+    if (input[i] === '\\' && i + 1 < input.length && '*`\\'.includes(input[i + 1])) {
+      result += input[i + 1];
+      i += 2;
+      continue;
+    }
+
+    // Bold-italic: ***text***
+    if (input[i] === '*' && input[i + 1] === '*' && input[i + 2] === '*') {
+      const closeIdx = input.indexOf('***', i + 3);
+      if (closeIdx !== -1) {
+        const inner = input.slice(i + 3, closeIdx);
+        const offset = codePointLength(result);
+        const { text: innerText, formatting: innerFmt } = processInlineFormatting(inner);
+        result += innerText;
+        const end = codePointLength(result);
+        formatting.push({ start: offset, end, style: { bold: true, italic: true } });
+        for (const f of innerFmt) {
+          formatting.push({ start: offset + f.start, end: offset + f.end, style: f.style });
+        }
+        i = closeIdx + 3;
+        continue;
+      }
+    }
+
+    // Bold: **text**
     if (input[i] === '*' && input[i + 1] === '*') {
       const closeIdx = input.indexOf('**', i + 2);
       if (closeIdx !== -1) {
-        const start = codePointLength(result);
-        result += input.slice(i + 2, closeIdx);
-        formatting.push({ start, end: codePointLength(result), style: { bold: true } });
+        const inner = input.slice(i + 2, closeIdx);
+        const offset = codePointLength(result);
+        const { text: innerText, formatting: innerFmt } = processInlineFormatting(inner);
+        result += innerText;
+        const end = codePointLength(result);
+        formatting.push({ start: offset, end, style: { bold: true } });
+        for (const f of innerFmt) {
+          formatting.push({ start: offset + f.start, end: offset + f.end, style: f.style });
+        }
         i = closeIdx + 2;
         continue;
       }
-    } else if (input[i] === '*') {
+    }
+
+    // Italic: *text*
+    if (input[i] === '*') {
       const closeIdx = input.indexOf('*', i + 1);
       if (closeIdx !== -1) {
-        const start = codePointLength(result);
-        result += input.slice(i + 1, closeIdx);
-        formatting.push({ start, end: codePointLength(result), style: { italic: true } });
+        const inner = input.slice(i + 1, closeIdx);
+        const offset = codePointLength(result);
+        const { text: innerText, formatting: innerFmt } = processInlineFormatting(inner);
+        result += innerText;
+        const end = codePointLength(result);
+        formatting.push({ start: offset, end, style: { italic: true } });
+        for (const f of innerFmt) {
+          formatting.push({ start: offset + f.start, end: offset + f.end, style: f.style });
+        }
         i = closeIdx + 1;
         continue;
       }
     }
+
+    // Code span: `code` — no recursive formatting inside code spans
+    if (input[i] === '`') {
+      const closeIdx = input.indexOf('`', i + 1);
+      if (closeIdx !== -1) {
+        const offset = codePointLength(result);
+        result += input.slice(i + 1, closeIdx);
+        formatting.push({ start: offset, end: codePointLength(result), style: { code: true } });
+        i = closeIdx + 1;
+        continue;
+      }
+    }
+
     result += input[i];
     i++;
   }
@@ -97,16 +167,30 @@ export function markdownToBatchUpdates(text: string, startIndex: number): BatchU
     }
 
     for (const fmt of formatting) {
-      requests.push({
-        updateTextStyle: {
-          range: {
-            startIndex: currentIndex + fmt.start,
-            endIndex: currentIndex + fmt.end,
+      const { code, bold, italic } = fmt.style;
+      if (code) {
+        requests.push({
+          updateTextStyle: {
+            range: { startIndex: currentIndex + fmt.start, endIndex: currentIndex + fmt.end },
+            textStyle: { weightedFontFamily: { fontFamily: "Courier New", weight: 400 } },
+            fields: "weightedFontFamily",
           },
-          textStyle: fmt.style,
-          fields: Object.keys(fmt.style).join(","),
-        },
-      });
+        });
+      } else {
+        const textStyle: { bold?: boolean; italic?: boolean } = {};
+        const fields: string[] = [];
+        if (bold) { textStyle.bold = true; fields.push("bold"); }
+        if (italic) { textStyle.italic = true; fields.push("italic"); }
+        if (fields.length > 0) {
+          requests.push({
+            updateTextStyle: {
+              range: { startIndex: currentIndex + fmt.start, endIndex: currentIndex + fmt.end },
+              textStyle,
+              fields: fields.join(","),
+            },
+          });
+        }
+      }
     }
 
     currentIndex += insertedLen;
