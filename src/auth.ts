@@ -207,6 +207,7 @@ export async function handleAuthCallback(request: Request, env: Env): Promise<Re
 </html>`, {
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
       "Content-Security-Policy": `default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; form-action 'self'`,
       "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
       "Permissions-Policy": "geolocation=(), microphone=(), camera=()",

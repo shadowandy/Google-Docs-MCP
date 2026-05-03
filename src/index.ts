@@ -21,6 +21,7 @@ function buildCorsHeaders(requestOrigin: string | null, extra: Record<string, st
   const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-mcp-protocol-version",
+    "Access-Control-Max-Age": "86400",
     "X-Content-Type-Options": "nosniff",
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
@@ -150,9 +151,15 @@ export default {
           const userToken = url.searchParams.get("token");
           if (!userToken) return new Response("Missing Token", { status: 401 });
 
-          // Validate userToken exists
           const exists = await env.TOKENS.get(userToken);
           if (!exists) return new Response("Invalid Token", { status: 401 });
+
+          // Rate limit: 120 tool calls / token / minute (same as Streamable HTTP)
+          if (!await checkRateLimit(env.TOKENS, `mcp:${userToken}`, 120, 60)) {
+            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
+              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
+            });
+          }
 
           const id = env.MCP_SESSION.idFromName(userToken);
           const obj = env.MCP_SESSION.get(id);
@@ -175,7 +182,7 @@ export default {
         // Pattern: /mcp/messages?token=<userToken>
         if (url.pathname === "/mcp/messages") {
           let userToken = url.searchParams.get("token");
-          
+
           // Fallback: check Authorization header
           const auth = request.headers.get("Authorization");
           if (!userToken && auth?.startsWith("Bearer ")) {
@@ -183,6 +190,9 @@ export default {
           }
 
           if (!userToken) return new Response("Missing Token", { status: 401 });
+
+          const exists = await env.TOKENS.get(userToken);
+          if (!exists) return new Response("Invalid Token", { status: 401 });
 
           const id = env.MCP_SESSION.idFromName(userToken);
           const obj = env.MCP_SESSION.get(id);
@@ -228,6 +238,7 @@ export default {
 </html>`, {
           headers: {
             "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
             "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
             "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
             "Permissions-Policy": "geolocation=(), microphone=(), camera=()",

@@ -11,7 +11,7 @@ A Model Context Protocol (MCP) server hosted on Cloudflare Workers that enables 
 - **Context-Based Editing**: Allows the AI to replace a named section (e.g., "Replace the 'Introduction' section") without touching the rest of the document. The section header is always preserved.
 - **Robust Input Handling**: Accepts both bare Google Docs IDs and full `https://docs.google.com/...` URLs.
 - **Serverless & Stateful**: Uses Cloudflare Durable Objects to maintain session state across requests.
-- **Secure**: Built-in CSRF protection, automatic token refresh with failure handling, and scoped CORS for browser clients.
+- **Secure**: CSRF protection with IP-bound state, AES-GCM 256-bit token encryption at rest, rate limiting on all endpoints, strict input validation, body-size enforcement, and scoped CORS. See [Security Considerations](#security-considerations) for full details.
 
 ---
 
@@ -236,12 +236,56 @@ This immediately deletes the token from Cloudflare KV, blocking all future reque
 
 ---
 
-## Security Notes
+## Security Considerations
 
-- Each user receives a unique UUID token embedded in their connection URL. **Do not share this URL.**
-- OAuth tokens (including the long-lived refresh token) are encrypted at rest in Cloudflare KV using **AES-GCM 256-bit** encryption. The key is stored as a Wrangler secret (`TOKEN_ENCRYPTION_KEY`) and never appears in code or logs.
-- Only the minimum required Google API scopes are requested (`documents` read/write, `drive` read-only).
-- CSRF protection is applied to all OAuth callbacks via a time-limited state parameter stored in KV (5-minute TTL, deleted on first use).
-- **CORS** is restricted to an explicit allowlist (`https://claude.ai`, `https://app.claude.ai`). Requests from other origins receive no CORS headers. To add a new MCP client, add its origin to `ALLOWED_ORIGINS` in `src/index.ts` and redeploy.
-- **Rate limiting** is enforced via KV counters: 10 requests per IP per minute on the auth endpoints, and 120 requests per token per minute on the MCP tool-call endpoint.
-- Token revocation uses a `POST` request; the web form on the home page handles this automatically. Direct API calls to `/auth/logout` must use `POST` with the token in the request body.
+### Token & Credential Protection
+
+- Each user receives a unique UUID token embedded in their MCP connection URL. **Treat this URL as a password — do not share it.** Anyone who holds the URL can read and edit your Google Documents.
+- OAuth tokens (including the long-lived Google refresh token) are encrypted at rest in Cloudflare KV using **AES-GCM 256-bit** encryption. The encryption key is stored as a Wrangler secret (`TOKEN_ENCRYPTION_KEY`) and never appears in code, logs, or responses.
+- Session tokens expire after **90 days**. Re-authenticate at `/auth/login` to obtain a fresh token.
+- The `Mcp-Session-Id` response header returns a short SHA-256-derived tag rather than the raw token, so the bearer credential does not appear in server logs or browser network traces.
+
+### Authentication & Authorisation
+
+- Only the minimum required Google API scopes are requested: `documents` (read/write) and `drive.readonly`. No other Google data is accessible.
+- Required scopes are **verified server-side** after the OAuth exchange. If the user denies any scope, authentication is rejected and the token is not issued.
+- The OAuth `state` parameter is **bound to the client IP address** and stored in KV with a 5-minute TTL. It is deleted on first use before the token exchange to prevent CSRF and cross-IP replay attacks.
+- Token revocation is **immediate**: deleting a token via `/auth/logout` or the web form causes all subsequent requests using that token to fail at the edge before reaching the Durable Object.
+- A defense-in-depth revocation check runs inside the Durable Object as well — `tools/list` and every tool call re-validate the token against KV on each request.
+
+### Rate Limiting
+
+Rate limits are enforced via Cloudflare KV counters across all entry points:
+
+| Endpoint | Limit |
+|---|---|
+| `/auth/login`, `/auth/callback` | 10 requests per IP per minute |
+| `/mcp`, `/mcp/sse`, `/mcp/messages` | 120 requests per token per minute |
+| Google API calls (per token, inside DO) | 100 calls per token per minute |
+
+All rate-limited responses include a `Retry-After: 60` header.
+
+### Input Validation & Size Limits
+
+- Document IDs are validated against the regex `^[a-zA-Z0-9_-]{25,55}$` before any Google API call is made, blocking path traversal and injection attempts.
+- Search queries have special characters (`(`, `)`, `'`, `"`, `\`) stripped and are capped at 200 characters before being forwarded to the Drive API.
+- Incoming MCP request bodies are limited to **512 KB** — the raw bytes are measured after reading, not trusted from the `Content-Length` header.
+- Google Docs API responses are limited to **10 MB** — the actual response body bytes are measured after reading, not trusted from the `Content-Length` header. Documents exceeding this limit are rejected.
+
+### Network & Browser Security
+
+- **CORS** is restricted to an explicit allowlist (`https://claude.ai`, `https://app.claude.ai`). Requests from other origins receive no CORS headers and cannot make credentialed cross-origin calls. To add a new MCP client origin, add it to `ALLOWED_ORIGINS` in `src/index.ts` and redeploy.
+- All HTML pages served by the worker include a full suite of security headers:
+  - `Content-Security-Policy` — `default-src 'none'`; scripts allowed only via per-request nonce
+  - `Strict-Transport-Security` — HSTS with `max-age=31536000; includeSubDomains; preload`
+  - `X-Frame-Options: DENY`
+  - `X-Content-Type-Options: nosniff`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Permissions-Policy` — camera, microphone, and geolocation disabled
+  - `Cache-Control: no-store` on all pages that display tokens or authentication state
+
+### Error Handling & Information Disclosure
+
+- Internal error details (`error.message`, stack traces) are logged server-side via `console.error` and are visible in the Cloudflare Workers dashboard, but are never forwarded to MCP clients. Clients receive a generic `"An internal error occurred"` message.
+- Raw Google API error responses are sanitised before being included in any server-generated error: JSON is truncated to 300 characters and HTML tags are stripped.
+- Token revocation uses `POST` only; the web form on the home page handles this. Direct API calls to `/auth/logout` must supply the token in the `POST` body (JSON `{"token": "..."}` or form data `token=...`).
