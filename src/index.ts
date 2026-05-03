@@ -1,9 +1,8 @@
 import { handleAuthLogin, handleAuthCallback } from "./auth";
 import { MCPSession } from "./session";
 import { Env } from "./types";
-import { checkRateLimit } from "./utils";
+import { checkRateLimit, tokenTag, BASE_SECURITY_HEADERS } from "./utils";
 
-// Export Durable Object class
 export { MCPSession };
 
 const ALLOWED_ORIGINS = [
@@ -11,20 +10,11 @@ const ALLOWED_ORIGINS = [
   "https://app.claude.ai",
 ];
 
-async function tokenTag(token: string): Promise<string> {
-  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token));
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 8);
-}
-
-
 function buildCorsHeaders(requestOrigin: string | null, extra: Record<string, string> = {}): Record<string, string> {
   const headers: Record<string, string> = {
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, x-mcp-protocol-version",
     "Access-Control-Max-Age": "86400",
-    "X-Content-Type-Options": "nosniff",
-    "X-Frame-Options": "DENY",
-    "Referrer-Policy": "strict-origin-when-cross-origin",
     ...extra,
   };
   if (requestOrigin && ALLOWED_ORIGINS.includes(requestOrigin)) {
@@ -34,64 +24,133 @@ function buildCorsHeaders(requestOrigin: string | null, extra: Record<string, st
   return headers;
 }
 
-export default {
-  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
-    const url = new URL(request.url);
-    const method = request.method;
-    const pathname = url.pathname;
-    
-    console.log(`[Worker Request] ${method} ${pathname}`);
-    
-    try {
-      // Global CORS handling — only allowlisted origins receive credentials
-      const origin = request.headers.get("Origin");
-      const requestedHeaders = request.headers.get("Access-Control-Request-Headers");
-      const corsHeaders = buildCorsHeaders(origin, requestedHeaders ? { "Access-Control-Allow-Headers": requestedHeaders } : {});
+function tooManyRequests(): Response {
+  return new Response(JSON.stringify({ error: "Too Many Requests" }), {
+    status: 429,
+    headers: { "Content-Type": "application/json", "Retry-After": "60" },
+  });
+}
 
-      if (request.method === "OPTIONS") {
-        return new Response(null, { headers: corsHeaders });
-      }
+/** Validates that a token exists in KV. Returns the token string on success, or an error Response. */
+async function resolveToken(token: string | null, env: Env): Promise<string | Response> {
+  if (!token) return new Response("Missing Token", { status: 401 });
+  const exists = await env.TOKENS.get(token);
+  if (!exists) return new Response("Invalid Token", { status: 401 });
+  return token;
+}
 
-      const handleRequest = async () => {
-        // OAuth endpoints — rate-limited by IP (10 req / IP / minute)
-        if (url.pathname === "/auth/login") {
-          const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-          if (!await checkRateLimit(env.TOKENS, `auth:${ip}`, 10, 60)) {
-            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
-              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
-            });
-          }
-          return handleAuthLogin(request, env);
-        }
-        if (url.pathname === "/auth/callback") {
-          const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
-          if (!await checkRateLimit(env.TOKENS, `auth:${ip}`, 10, 60)) {
-            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
-              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
-            });
-          }
-          return handleAuthCallback(request, env);
-        }
+// ── Route handlers ──────────────────────────────────────────────────────────
 
-        // Revocation: POST /auth/logout — token in request body proves ownership
-        if (url.pathname === "/auth/logout") {
-          if (request.method !== "POST") {
-            return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
-          }
-          let userToken: string | null = null;
-          const ct = request.headers.get("content-type") ?? "";
-          if (ct.includes("application/json")) {
-            const body = await request.json() as any;
-            userToken = typeof body?.token === "string" ? body.token : null;
-          } else {
-            const form = await request.formData();
-            userToken = form.get("token") as string | null;
-          }
-          if (userToken) {
-            const exists = await env.TOKENS.get(userToken);
-            if (!exists) return new Response("Token not found.", { status: 404 });
-            await env.TOKENS.delete(userToken);
-            return new Response(`<!DOCTYPE html>
+async function handleLogin(request: Request, env: Env): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!await checkRateLimit(env.TOKENS, `auth:${ip}`, 10, 60)) return tooManyRequests();
+  return handleAuthLogin(request, env);
+}
+
+async function handleCallback(request: Request, env: Env): Promise<Response> {
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!await checkRateLimit(env.TOKENS, `auth:${ip}`, 10, 60)) return tooManyRequests();
+  return handleAuthCallback(request, env);
+}
+
+async function handleLogout(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response("Method Not Allowed", { status: 405, headers: { Allow: "POST" } });
+  }
+
+  let userToken: string | null = null;
+  const ct = request.headers.get("content-type") ?? "";
+  if (ct.includes("application/json")) {
+    const body = await request.json() as any;
+    userToken = typeof body?.token === "string" ? body.token : null;
+  } else {
+    const form = await request.formData();
+    userToken = form.get("token") as string | null;
+  }
+
+  if (!userToken) return new Response("Missing token.", { status: 400 });
+
+  const exists = await env.TOKENS.get(userToken);
+  if (!exists) return new Response("Token not found.", { status: 404 });
+  await env.TOKENS.delete(userToken);
+
+  return new Response(logoutSuccessHtml(), {
+    status: 200,
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
+      ...BASE_SECURITY_HEADERS,
+    },
+  });
+}
+
+async function handleMcp(request: Request, env: Env, url: URL): Promise<Response> {
+  const resolved = await resolveToken(url.searchParams.get("token"), env);
+  if (resolved instanceof Response) return resolved;
+  if (!await checkRateLimit(env.TOKENS, `mcp:${resolved}`, 120, 60)) return tooManyRequests();
+
+  const id = env.MCP_SESSION.idFromName(resolved);
+  const obj = env.MCP_SESSION.get(id);
+  const doUrl = new URL(request.url);
+  doUrl.pathname = "/streamable";
+  doUrl.searchParams.set("userToken", resolved);
+
+  console.log(`[Edge] Routing ${request.method} /mcp to DO streamable. token:${await tokenTag(resolved)}`);
+  return obj.fetch(new Request(doUrl.toString(), request));
+}
+
+async function handleMcpSse(request: Request, env: Env, url: URL): Promise<Response> {
+  const resolved = await resolveToken(url.searchParams.get("token"), env);
+  if (resolved instanceof Response) return resolved;
+  if (!await checkRateLimit(env.TOKENS, `mcp:${resolved}`, 120, 60)) return tooManyRequests();
+
+  const id = env.MCP_SESSION.idFromName(resolved);
+  const obj = env.MCP_SESSION.get(id);
+  const doUrl = new URL(request.url);
+
+  if (request.method === "POST") {
+    doUrl.pathname = "/messages";
+  } else {
+    doUrl.pathname = "/sse";
+    doUrl.searchParams.set("userToken", resolved);
+  }
+
+  console.log(`[Edge] Routing ${request.method} /mcp/sse to DO. token:${await tokenTag(resolved)} DO ID: ${id.toString()}`);
+  return obj.fetch(new Request(doUrl.toString(), request));
+}
+
+async function handleMcpMessages(request: Request, env: Env, url: URL): Promise<Response> {
+  let token = url.searchParams.get("token");
+  const auth = request.headers.get("Authorization");
+  if (!token && auth?.startsWith("Bearer ")) token = auth.slice(7);
+
+  const resolved = await resolveToken(token, env);
+  if (resolved instanceof Response) return resolved;
+
+  const id = env.MCP_SESSION.idFromName(resolved);
+  const obj = env.MCP_SESSION.get(id);
+
+  console.log(`[Edge] Routing POST /mcp/messages to DO. token:${await tokenTag(resolved)} DO ID: ${id.toString()}`);
+  const msgUrl = new URL(request.url);
+  msgUrl.pathname = "/messages";
+  return obj.fetch(new Request(msgUrl.toString(), request));
+}
+
+function handleHomePage(): Response {
+  return new Response(homePageHtml(), {
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "Cache-Control": "no-store",
+      "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
+      ...BASE_SECURITY_HEADERS,
+    },
+  });
+}
+
+// ── HTML templates ──────────────────────────────────────────────────────────
+
+function logoutSuccessHtml(): string {
+  return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -103,109 +162,11 @@ export default {
     <p>Your token has been securely revoked from Cloudflare KV.</p>
     <p><a href="/">Return to Home</a></p>
   </body>
-</html>`, {
-              status: 200, headers: {
-                "Content-Type": "text/html; charset=utf-8",
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'",
-                "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-                "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
-                "X-Content-Type-Options": "nosniff",
-                "X-Frame-Options": "DENY",
-                "Referrer-Policy": "strict-origin-when-cross-origin",
-              }
-            });
-          }
-          return new Response("Missing token.", { status: 400 });
-        }
+</html>`;
+}
 
-        // Streamable HTTP MCP endpoint (MCP 2025-03-26)
-        // Pattern: /mcp?token=<userToken>
-        if (url.pathname === "/mcp") {
-          const userToken = url.searchParams.get("token");
-          if (!userToken) return new Response("Missing Token", { status: 401 });
-
-          const exists = await env.TOKENS.get(userToken);
-          if (!exists) return new Response("Invalid Token", { status: 401 });
-
-          // Rate limit: 120 tool calls / token / minute
-          if (!await checkRateLimit(env.TOKENS, `mcp:${userToken}`, 120, 60)) {
-            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
-              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
-            });
-          }
-
-          const id = env.MCP_SESSION.idFromName(userToken);
-          const obj = env.MCP_SESSION.get(id);
-
-          const doUrl = new URL(request.url);
-          doUrl.pathname = "/streamable";
-          doUrl.searchParams.set("userToken", userToken);
-
-          console.log(`[Edge] Routing ${request.method} /mcp to DO streamable. token:${await tokenTag(userToken)}`);
-          return obj.fetch(new Request(doUrl.toString(), request));
-        }
-
-        // Stable MCP SSE Connection
-        // Pattern: /mcp/sse?token=<userToken>
-        if (url.pathname === "/mcp/sse") {
-          const userToken = url.searchParams.get("token");
-          if (!userToken) return new Response("Missing Token", { status: 401 });
-
-          const exists = await env.TOKENS.get(userToken);
-          if (!exists) return new Response("Invalid Token", { status: 401 });
-
-          // Rate limit: 120 tool calls / token / minute (same as Streamable HTTP)
-          if (!await checkRateLimit(env.TOKENS, `mcp:${userToken}`, 120, 60)) {
-            return new Response(JSON.stringify({ error: "Too Many Requests" }), {
-              status: 429, headers: { "Content-Type": "application/json", "Retry-After": "60" }
-            });
-          }
-
-          const id = env.MCP_SESSION.idFromName(userToken);
-          const obj = env.MCP_SESSION.get(id);
-          console.log(`[Edge] Routing ${request.method} /mcp/sse to DO. token:${await tokenTag(userToken)} DO ID: ${id.toString()}`);
-          
-          const doUrl = new URL(request.url);
-          
-          // If it's a POST request to /mcp/sse, it's likely a fallback message post from the client
-          if (request.method === "POST") {
-            doUrl.pathname = "/messages";
-          } else {
-            doUrl.pathname = "/sse";
-            doUrl.searchParams.set("userToken", userToken);
-          }
-          
-          return obj.fetch(new Request(doUrl.toString(), request));
-        }
-
-        // Stable Messages Endpoint
-        // Pattern: /mcp/messages?token=<userToken>
-        if (url.pathname === "/mcp/messages") {
-          let userToken = url.searchParams.get("token");
-
-          // Fallback: check Authorization header
-          const auth = request.headers.get("Authorization");
-          if (!userToken && auth?.startsWith("Bearer ")) {
-            userToken = auth.slice(7);
-          }
-
-          if (!userToken) return new Response("Missing Token", { status: 401 });
-
-          const exists = await env.TOKENS.get(userToken);
-          if (!exists) return new Response("Invalid Token", { status: 401 });
-
-          const id = env.MCP_SESSION.idFromName(userToken);
-          const obj = env.MCP_SESSION.get(id);
-          console.log(`[Edge] Routing POST /mcp/messages to DO. token:${await tokenTag(userToken)} DO ID: ${id.toString()}`);
-
-          const msgUrl = new URL(request.url);
-          msgUrl.pathname = "/messages";
-          
-          return obj.fetch(new Request(msgUrl.toString(), request));
-        }
-
-        // Fallback for /, /auth, etc.
-        return new Response(`<!DOCTYPE html>
+function homePageHtml(): string {
+  return `<!DOCTYPE html>
 <html lang="en">
   <head>
     <meta charset="utf-8">
@@ -235,45 +196,64 @@ export default {
       </form>
     </div>
   </body>
-</html>`, {
-          headers: {
-            "Content-Type": "text/html; charset=utf-8",
-            "Cache-Control": "no-store",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'",
-            "Strict-Transport-Security": "max-age=31536000; includeSubDomains; preload",
-            "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
-            "X-Content-Type-Options": "nosniff",
-            "X-Frame-Options": "DENY",
-            "Referrer-Policy": "strict-origin-when-cross-origin",
-          }
-        });
-      };
+</html>`;
+}
 
-      const response = await handleRequest();
+// ── Worker entry point ───────────────────────────────────────────────────────
 
-      // Cleanly append CORS headers to the response
+export default {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    console.log(`[Worker Request] ${request.method} ${url.pathname}`);
+
+    try {
+      const origin = request.headers.get("Origin");
+      const requestedHeaders = request.headers.get("Access-Control-Request-Headers");
+      const corsHeaders = buildCorsHeaders(
+        origin,
+        requestedHeaders ? { "Access-Control-Allow-Headers": requestedHeaders } : {}
+      );
+
+      if (request.method === "OPTIONS") {
+        return new Response(null, { headers: corsHeaders });
+      }
+
+      let response: Response;
+      const { pathname } = url;
+
+      if (pathname === "/auth/login") {
+        response = await handleLogin(request, env);
+      } else if (pathname === "/auth/callback") {
+        response = await handleCallback(request, env);
+      } else if (pathname === "/auth/logout") {
+        response = await handleLogout(request, env);
+      } else if (pathname === "/mcp") {
+        response = await handleMcp(request, env, url);
+      } else if (pathname === "/mcp/sse") {
+        response = await handleMcpSse(request, env, url);
+      } else if (pathname === "/mcp/messages") {
+        response = await handleMcpMessages(request, env, url);
+      } else {
+        response = handleHomePage();
+      }
+
+      // Append CORS headers without overwriting anything the route handler already set.
       const newHeaders = new Headers(response.headers);
-      Object.entries(corsHeaders).forEach(([key, value]) => {
+      for (const [key, value] of Object.entries(corsHeaders)) {
         newHeaders.set(key, value);
-      });
-
+      }
       return new Response(response.body, {
         status: response.status,
         statusText: response.statusText,
-        headers: newHeaders
+        headers: newHeaders,
       });
+
     } catch (e: any) {
       console.error("Worker Error:", e.stack || e.message);
-
-      const errorCors = buildCorsHeaders(request.headers.get("Origin"));
-      const errorHeaders = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
-      Object.entries(errorCors).forEach(([key, value]) => errorHeaders.set(key, value));
-
-      return new Response(JSON.stringify({ error: "Internal Server Error" }), {
-        status: 500,
-        headers: errorHeaders
-      });
+      const corsHeaders = buildCorsHeaders(request.headers.get("Origin"));
+      const headers = new Headers({ "Content-Type": "application/json", "Cache-Control": "no-store" });
+      for (const [key, value] of Object.entries(corsHeaders)) headers.set(key, value);
+      return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500, headers });
     }
   },
 };
-

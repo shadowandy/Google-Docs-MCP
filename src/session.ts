@@ -6,162 +6,22 @@ import {
   McpError,
   JSONRPCMessage
 } from "@modelcontextprotocol/sdk/types.js";
-import { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { getAccessToken } from "./auth";
 import { Env } from "./types";
 import { getDocument, createDocument, searchDocuments, replaceSection, appendText, listSections, getDocumentInfo, findAndReplace, listDocuments, deleteSection } from "./google-api";
 import { docToMarkdown } from "./markdown-utils";
-import { checkRateLimit } from "./utils";
-
-/**
- * SSE transport for Cloudflare Workers.
- * Sends responses over a persistent SSE stream; client POSTs messages to a separate endpoint.
- */
-class CloudflareSSEServerTransport implements Transport {
-  private _controller: ReadableStreamDefaultController | null = null;
-  private _encoder = new TextEncoder();
-  private _endpoint: string;
-  private _sessionId: string;
-
-  onclose?: () => void;
-  onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
-
-  constructor(endpoint: string) {
-    this._endpoint = endpoint;
-    this._sessionId = crypto.randomUUID();
-  }
-
-  get sessionId() { return this._sessionId; }
-
-  async start() {}
-
-  async send(message: JSONRPCMessage): Promise<void> {
-    if (!this._controller) return;
-    try {
-      this._controller.enqueue(this._encoder.encode(`event: message\ndata: ${JSON.stringify(message)}\n\n`));
-    } catch (e) {
-      console.error("SSE Send Error:", e);
-    }
-  }
-
-  async close(): Promise<void> {
-    try { this._controller?.close(); } catch {}
-    this._controller = null;
-    this.onclose?.();
-  }
-
-  handleSseRequest(): Response {
-    let keepAliveInterval: ReturnType<typeof setInterval>;
-
-    const stream = new ReadableStream({
-      start: (controller) => {
-        this._controller = controller;
-
-        const endpointUrl = new URL(this._endpoint);
-        endpointUrl.searchParams.set("sessionId", this._sessionId);
-
-        controller.enqueue(this._encoder.encode(`: connected\n\n`));
-        controller.enqueue(this._encoder.encode(`event: endpoint\ndata: ${endpointUrl.toString()}\n\n`));
-
-        keepAliveInterval = setInterval(() => {
-          try {
-            if (this._controller) {
-              this._controller.enqueue(this._encoder.encode(`: keepalive\n\n`));
-            }
-          } catch (e) {
-            clearInterval(keepAliveInterval);
-          }
-        }, 15000);
-      },
-      cancel: () => {
-        clearInterval(keepAliveInterval);
-        this._controller = null;
-        this.onclose?.();
-      }
-    });
-
-    return new Response(stream, {
-      headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        "Connection": "keep-alive",
-        "Content-Encoding": "identity",
-      }
-    });
-  }
-
-  async handlePostRequest(request: Request): Promise<Response> {
-    try {
-      const message = await request.json();
-      this.onmessage?.(message as JSONRPCMessage);
-      return new Response("Accepted", { status: 202 });
-    } catch (e: any) {
-      return new Response(e.message, { status: 400 });
-    }
-  }
-}
-
-/**
- * Inline (Streamable HTTP) transport for MCP 2025-03-26.
- * Each processMessage call returns a Promise that resolves with the server's response,
- * so the HTTP handler can return it directly in the response body.
- */
-class OneShotTransport implements Transport {
-  private _pendingResolvers = new Map<string | number, (msg: JSONRPCMessage) => void>();
-
-  onclose?: () => void;
-  onerror?: (error: Error) => void;
-  onmessage?: (message: JSONRPCMessage) => void;
-
-  async start() {}
-
-  async send(message: JSONRPCMessage): Promise<void> {
-    const id = (message as any).id;
-    if (id != null) {
-      const resolve = this._pendingResolvers.get(id);
-      if (resolve) {
-        this._pendingResolvers.delete(id);
-        resolve(message);
-      }
-    }
-  }
-
-  async close(): Promise<void> {
-    this._pendingResolvers.clear();
-    this.onclose?.();
-  }
-
-  /** Send a message and await the server's JSON-RPC response, or null for notifications. */
-  processMessage(message: JSONRPCMessage, timeoutMs = 30_000): Promise<JSONRPCMessage | null> {
-    const id = (message as any).id;
-    if (id != null) {
-      return new Promise<JSONRPCMessage>((resolve, reject) => {
-        const timer = setTimeout(() => {
-          if (this._pendingResolvers.delete(id)) {
-            reject(new Error(`Timeout waiting for response to request id=${String(id)}`));
-          }
-        }, timeoutMs);
-        this._pendingResolvers.set(id, (msg) => {
-          clearTimeout(timer);
-          resolve(msg);
-        });
-        this.onmessage?.(message);
-      });
-    }
-    this.onmessage?.(message);
-    return Promise.resolve(null);
-  }
-}
+import { checkRateLimit, tokenTag } from "./utils";
+import { CloudflareSSEServerTransport } from "./transports/sse";
+import { StreamableHttpTransport } from "./transports/streamable";
 
 export class MCPSession {
   // SSE transport state
-  private server!: Server;
+  private server: Server | null = null;
   private transport: CloudflareSSEServerTransport | null = null;
 
   // Streamable HTTP transport state (lazy-initialised, lives for the DO's lifetime)
   private streamableServer: Server | null = null;
-  private streamableTransport: OneShotTransport | null = null;
+  private streamableTransport: StreamableHttpTransport | null = null;
 
   private state: DurableObjectState;
   private env: Env;
@@ -175,131 +35,131 @@ export class MCPSession {
   // ─── Tool definitions ────────────────────────────────────────────────────────
 
   private static readonly toolDefinitions = [
-      {
-        name: "read_document",
-        description: "Read a Google Document and return its full content as Markdown",
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" }
-          },
-          required: ["documentId"]
-        }
-      },
-      {
-        name: "create_document",
-        description: "Create a new, empty Google Document and return its ID",
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            title: { type: "string", description: "The title of the new Google Document" }
-          },
-          required: ["title"]
-        }
-      },
-      {
-        name: "search_documents",
-        description: "Search Google Drive for Documents matching a query by title or content",
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            query: { type: "string", description: "The search query to match against document names and content" }
-          },
-          required: ["query"]
-        }
-      },
-      {
-        name: "edit_section",
-        description: "Replace the content under a specific section header in a Google Document. The header itself is preserved; only the content beneath it is replaced.",
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
-            headerText: { type: "string", description: "The exact header text identifying the section to replace" },
-            newContent: { type: "string", description: "The Markdown content to insert beneath the header" }
-          },
-          required: ["documentId", "headerText", "newContent"]
-        }
-      },
-      {
-        name: "append_text",
-        description: "Append Markdown content to the very end of a Google Document",
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
-            newContent: { type: "string", description: "The Markdown content to append" }
-          },
-          required: ["documentId", "newContent"]
-        }
-      },
-      {
-        name: "list_sections",
-        description: "List all section headers in a Google Document with their heading level and position. Use this before edit_section or delete_section to confirm exact header text.",
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" }
-          },
-          required: ["documentId"]
-        }
-      },
-      {
-        name: "get_document_info",
-        description: "Return metadata for a Google Document: title, document ID, revision ID, last modified time, and file size. Does not return document body content.",
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" }
-          },
-          required: ["documentId"]
-        }
-      },
-      {
-        name: "find_and_replace",
-        description: "Find all occurrences of a text string in a Google Document and replace them. Returns the number of replacements made.",
-        annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
-            findText: { type: "string", description: "The text to search for" },
-            replaceText: { type: "string", description: "The text to replace each match with" },
-            matchCase: { type: "boolean", description: "Whether the search is case-sensitive (default: false)" }
-          },
-          required: ["documentId", "findText", "replaceText"]
-        }
-      },
-      {
-        name: "list_documents",
-        description: "List the user's most recently modified Google Documents from Drive. Returns up to 20 documents with their IDs, names, and last modified times.",
-        annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {},
-          required: []
-        }
-      },
-      {
-        name: "delete_section",
-        description: "Permanently delete a section from a Google Document — the header and all content beneath it up to the next same-or-higher-level heading. This action cannot be undone.",
-        annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
-        inputSchema: {
-          type: "object" as const,
-          properties: {
-            documentId: { type: "string", description: "The ID or full URL of the Google Document" },
-            headerText: { type: "string", description: "The exact header text of the section to delete" }
-          },
-          required: ["documentId", "headerText"]
-        }
+    {
+      name: "read_document",
+      description: "Read a Google Document and return its full content as Markdown",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" }
+        },
+        required: ["documentId"]
       }
+    },
+    {
+      name: "create_document",
+      description: "Create a new, empty Google Document and return its ID",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          title: { type: "string", description: "The title of the new Google Document" }
+        },
+        required: ["title"]
+      }
+    },
+    {
+      name: "search_documents",
+      description: "Search Google Drive for Documents matching a query by title or content",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          query: { type: "string", description: "The search query to match against document names and content" }
+        },
+        required: ["query"]
+      }
+    },
+    {
+      name: "edit_section",
+      description: "Replace the content under a specific section header in a Google Document. The header itself is preserved; only the content beneath it is replaced.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          headerText: { type: "string", description: "The exact header text identifying the section to replace" },
+          newContent: { type: "string", description: "The Markdown content to insert beneath the header" }
+        },
+        required: ["documentId", "headerText", "newContent"]
+      }
+    },
+    {
+      name: "append_text",
+      description: "Append Markdown content to the very end of a Google Document",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          newContent: { type: "string", description: "The Markdown content to append" }
+        },
+        required: ["documentId", "newContent"]
+      }
+    },
+    {
+      name: "list_sections",
+      description: "List all section headers in a Google Document with their heading level and position. Use this before edit_section or delete_section to confirm exact header text.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" }
+        },
+        required: ["documentId"]
+      }
+    },
+    {
+      name: "get_document_info",
+      description: "Return metadata for a Google Document: title, document ID, revision ID, last modified time, and file size. Does not return document body content.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" }
+        },
+        required: ["documentId"]
+      }
+    },
+    {
+      name: "find_and_replace",
+      description: "Find all occurrences of a text string in a Google Document and replace them. Returns the number of replacements made.",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          findText: { type: "string", description: "The text to search for" },
+          replaceText: { type: "string", description: "The text to replace each match with" },
+          matchCase: { type: "boolean", description: "Whether the search is case-sensitive (default: false)" }
+        },
+        required: ["documentId", "findText", "replaceText"]
+      }
+    },
+    {
+      name: "list_documents",
+      description: "List the user's most recently modified Google Documents from Drive. Returns up to 20 documents with their IDs, names, and last modified times.",
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {},
+        required: []
+      }
+    },
+    {
+      name: "delete_section",
+      description: "Permanently delete a section from a Google Document — the header and all content beneath it up to the next same-or-higher-level heading. This action cannot be undone.",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
+      inputSchema: {
+        type: "object" as const,
+        properties: {
+          documentId: { type: "string", description: "The ID or full URL of the Google Document" },
+          headerText: { type: "string", description: "The exact header text of the section to delete" }
+        },
+        required: ["documentId", "headerText"]
+      }
+    }
   ];
 
   // ─── Tool call dispatcher (shared between SSE and Streamable HTTP) ───────────
@@ -311,7 +171,6 @@ export class MCPSession {
     const accessToken = await getAccessToken(userToken, this.env);
     if (!accessToken) throw new McpError(ErrorCode.InvalidRequest, "Not authenticated or token expired");
 
-    // F18: Limit Google API calls per token to prevent quota exhaustion
     if (!await checkRateLimit(this.env.TOKENS, `google:${userToken}`, 100, 60)) {
       throw new McpError(ErrorCode.InvalidRequest, "Google API rate limit exceeded. Please wait before retrying.");
     }
@@ -384,8 +243,7 @@ export class MCPSession {
   private registerHandlers(server: Server) {
     server.setRequestHandler(ListToolsRequestSchema, async () => {
       this.log("info", "tools/list request received");
-      
-      // Defense-in-depth: verify session token still exists in KV
+
       const userToken = await this.state.storage.get<string>("userToken");
       if (!userToken) throw new McpError(ErrorCode.InvalidRequest, "Session not initialised");
       const valid = await this.env.TOKENS.get(userToken);
@@ -410,12 +268,14 @@ export class MCPSession {
 
   // ─── SSE server lifecycle ─────────────────────────────────────────────────────
 
-  private initializeSseServer() {
-    this.server = new Server(
+  private initializeSseServer(): Server {
+    const server = new Server(
       { name: "google-docs-mcp", version: "1.0.0" },
       { capabilities: { tools: { listChanged: true } } }
     );
-    this.registerHandlers(this.server);
+    this.registerHandlers(server);
+    this.server = server;
+    return server;
   }
 
   // ─── Streamable HTTP server lifecycle ─────────────────────────────────────────
@@ -428,7 +288,7 @@ export class MCPSession {
       { capabilities: { tools: { listChanged: true } } }
     );
     this.registerHandlers(this.streamableServer);
-    this.streamableTransport = new OneShotTransport();
+    this.streamableTransport = new StreamableHttpTransport();
     await this.streamableServer.connect(this.streamableTransport);
     this.log("info", "Streamable HTTP server initialised");
   }
@@ -470,18 +330,14 @@ export class MCPSession {
     const response = await this.streamableTransport!.processMessage(body);
 
     if (response === null) {
-      // Notification — no response body
       return new Response(null, { status: 202 });
     }
-
-    const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(userToken));
-    const sessionTag = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
 
     return new Response(JSON.stringify(response), {
       status: 200,
       headers: {
         "Content-Type": "application/json",
-        "Mcp-Session-Id": sessionTag,
+        "Mcp-Session-Id": await tokenTag(userToken, 16),
       }
     });
   }
@@ -492,6 +348,8 @@ export class MCPSession {
     const logData = data ? `${message} ${JSON.stringify(data)}` : message;
     if (level === "error") {
       console.error(`[MCP ${level}]`, logData);
+    } else if (level === "warning") {
+      console.warn(`[MCP ${level}]`, logData);
     } else {
       console.log(`[MCP ${level}]`, logData);
     }
@@ -510,13 +368,10 @@ export class MCPSession {
         if (!userToken) return new Response("Missing userToken", { status: 401 });
 
         if (request.method === "GET") {
-          // Optional: SSE channel for server-initiated notifications
-          // For now, return 405 — we don't send server-initiated notifications
           return new Response("Use POST for Streamable HTTP", { status: 405 });
         }
 
         if (request.method === "POST") {
-          // Store token so tool calls can use it — write only when the value changes
           const storedToken = await this.state.storage.get<string>("userToken");
           if (storedToken !== userToken) {
             await this.state.storage.put("userToken", userToken);
@@ -531,22 +386,20 @@ export class MCPSession {
       if (url.pathname.endsWith("/sse")) {
         const userToken = url.searchParams.get("userToken");
         if (userToken) {
-          // F19: Re-validate token inside the DO for defence-in-depth
           const valid = await this.env.TOKENS.get(userToken);
           if (!valid) return new Response("Invalid or revoked token", { status: 401 });
           await this.state.storage.put("userToken", userToken);
           this.log("info", "Stored userToken for SSE session");
         }
 
-        // Close any existing connection
         if (this.transport && this.server) {
           this.log("info", "Closing existing SSE transport");
           try { await this.server.close(); } catch {}
           this.transport = null;
-          this.server = null!;
+          this.server = null;
         }
 
-        this.initializeSseServer();
+        const server = this.initializeSseServer();
 
         const messagesEndpoint = userToken
           ? `${url.origin}/mcp/messages?token=${userToken}`
@@ -555,7 +408,7 @@ export class MCPSession {
         this.transport = new CloudflareSSEServerTransport(messagesEndpoint);
         this.transport.onclose = () => this.log("info", "SSE transport closed");
 
-        await this.server.connect(this.transport);
+        await server.connect(this.transport);
         this.log("info", "SSE server connected");
         return this.transport.handleSseRequest();
       }

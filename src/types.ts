@@ -54,4 +54,14 @@ export interface BatchUpdateRequest {
   deleteContentRange?: {
     range: { startIndex: number; endIndex: number };
   };
+  replaceAllText?: {
+    containsText: { text: string; matchCase: boolean };
+    replaceText: string;
+  };
+}
+
+export interface SectionInfo {
+  level: number;
+  text: string;
+  startIndex: number;
 }
