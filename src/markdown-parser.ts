@@ -156,11 +156,14 @@ function emitInlineStyleRequests(
 // Convert a block of pipe-table lines into batch update requests.
 //
 // Google Docs table index layout (after insertTable at I, R rows × C cols):
-//   I      : structural marker before first row
-//   I+1+r*(C+1)+c : content of cell (r, c)  — one "\n" per empty cell
-//   I+1+r*(C+1)+C : row-end structural marker for row r
-//   I+1+R*(C+1)   : structural marker after last row
-// Total empty-table size = 2 + R*(C+1)
+//   I      : newline inserted by the API before the table
+//   I+1    : table-start structural marker
+//   I+2    : row-0 start marker
+//   I+3    : cell(0,0) outer marker
+//   I+4    : paragraph-start inside cell(0,0)
+//   I+5 + r*(C*2+1) + c*2 : content "\n" of cell(r,c)
+//   (rows 1+ have only a 1-position row-start before the first cell)
+// Total empty-table size = 5 + R*(2*C+1)
 //
 // Cells are filled in reverse document order so each insertion is at a
 // higher index than all later insertions, keeping base positions stable.
@@ -203,7 +206,7 @@ function processTableBlock(
 
       if (!plainText) continue;
 
-      const cellIndex = startIndex + 1 + r * (numCols + 1) + c;
+      const cellIndex = startIndex + 5 + r * (numCols * 2 + 1) + c * 2;
 
       requests.push({
         insertText: {
@@ -216,8 +219,8 @@ function processTableBlock(
     }
   }
 
-  // Empty table occupies 2 + R*(C+1) indices; cell content adds on top.
-  const indexAdvance = 2 + numRows * (numCols + 1) + totalContentCodePoints;
+  // Empty table occupies 5 + R*(2*C+1) indices (including leading newline); cell content adds on top.
+  const indexAdvance = 5 + numRows * (numCols * 2 + 1) + totalContentCodePoints;
 
   return { requests, indexAdvance };
 }

@@ -219,25 +219,25 @@ describe("markdownToBatchUpdates", () => {
     expect(texts).toContain("B");
   });
 
-  it("table: cell (0,0) text is inserted at startIndex + 1", () => {
-    // Cell (r,c) base index = startIndex + 1 + r*(numCols+1) + c
-    // For 1x2 table at index 5: cell(0,0) = 5+1+0+0 = 6
+  it("table: cell (0,0) text is inserted at startIndex + 5", () => {
+    // Cell (r,c) base index = startIndex + 5 + r*(numCols*2+1) + c*2
+    // For 1x2 table at index 5: cell(0,0) = 5+5+0+0 = 10
     const reqs = markdownToBatchUpdates("| A | B |", 5);
     const insertA = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "A");
-    expect(insertA!.insertText!.location.index).toBe(6);
+    expect(insertA!.insertText!.location.index).toBe(10);
   });
 
-  it("table: cell (0,1) text is inserted at startIndex + 2", () => {
-    // For 1x2 at index 5: cell(0,1) = 5+1+0+1 = 7
+  it("table: cell (0,1) text is inserted at startIndex + 7", () => {
+    // For 1x2 at index 5: cell(0,1) = 5+5+0+1*2 = 12
     const reqs = markdownToBatchUpdates("| A | B |", 5);
     const insertB = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "B");
-    expect(insertB!.insertText!.location.index).toBe(7);
+    expect(insertB!.insertText!.location.index).toBe(12);
   });
 
   it("table: cell inserts are ordered last-cell-first (reverse document order)", () => {
     const reqs = markdownToBatchUpdates("| A | B |", 0);
     const inserts = reqs.filter(r => r.insertText);
-    // B (index 2) should appear before A (index 1) in the request list
+    // B (index 7) should appear before A (index 5) in the request list
     const idxB = inserts.findIndex(r => r.insertText!.text === "B");
     const idxA = inserts.findIndex(r => r.insertText!.text === "A");
     expect(idxB).toBeLessThan(idxA);
@@ -251,10 +251,10 @@ describe("markdownToBatchUpdates", () => {
 
   it("table: content after a table starts at the correct index", () => {
     // 1-row 2-col table at index 0:
-    // Empty table size = 2 + 1*(2+1) = 5; "A"=1, "B"=1 → advance = 5+2 = 7
+    // Empty table size = 5 + 1*(2*2+1) = 10; "A"=1, "B"=1 → advance = 10+2 = 12
     const reqs = markdownToBatchUpdates("| A | B |\nafter", 0);
     const afterInsert = reqs.filter(r => r.insertText).find(r => r.insertText!.text === "after\n");
-    expect(afterInsert!.insertText!.location.index).toBe(7);
+    expect(afterInsert!.insertText!.location.index).toBe(12);
   });
 
   // ── Input limits ───────────────────────────────────────────────────────────
